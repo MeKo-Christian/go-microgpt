@@ -85,6 +85,7 @@
       .span-5 { grid-column: span 5; }
       .span-7 { grid-column: span 7; }
       .span-8 { grid-column: span 8; }
+      .span-12 { grid-column: span 12; }
 
       .row {
         display: flex;
@@ -262,6 +263,63 @@
         stroke-width: 1;
       }
 
+      .pipeline-scroll {
+        overflow-x: auto;
+        margin-top: 8px;
+      }
+
+      .pipeline-stage {
+        position: relative;
+        width: 980px;
+        height: 220px;
+        border: 1px solid #355974;
+        border-radius: 12px;
+        background: #071221;
+      }
+
+      .pipeline-node {
+        position: absolute;
+        width: 150px;
+        min-height: 62px;
+        padding: 8px;
+        border-radius: 10px;
+        border: 1px solid #3f6581;
+        background: #0b1a2a;
+        box-shadow: 0 4px 16px #00000022;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+      }
+
+      .pipeline-node .k {
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 0.7rem;
+        letter-spacing: 0.06em;
+        color: #8db6d1;
+        text-transform: uppercase;
+      }
+
+      .pipeline-node .v {
+        margin-top: 3px;
+        font-size: 0.9rem;
+      }
+
+      .pipeline-node.active {
+        border-color: #75e2ff;
+        box-shadow: 0 0 0 1px #75e2ff66, 0 8px 18px #1da8d24d;
+        transform: translateY(-1px);
+      }
+
+      .pipeline-edge {
+        fill: none;
+        stroke: #385a75;
+        stroke-width: 1.6;
+        stroke-dasharray: 6 5;
+        transition: stroke 0.18s ease;
+      }
+
+      .pipeline-edge.active {
+        stroke: #73ddff;
+      }
+
       .hint {
         margin-top: 8px;
         font-size: 0.8rem;
@@ -293,6 +351,47 @@
       </div>
 
       <div class="grid">
+        <section class="card span-12">
+          <h3>Pipeline Diagram</h3>
+          <div class="pipeline-scroll">
+            <div class="pipeline-stage">
+              <svg viewBox="0 0 980 220" width="980" height="220" style="position: absolute; inset: 0; pointer-events: none">
+                <path id="edge-dataset-tokenizer" class="pipeline-edge" d="M 160 56 C 210 56, 230 56, 280 56"></path>
+                <path id="edge-tokenizer-config" class="pipeline-edge" d="M 430 56 C 480 56, 500 56, 550 56"></path>
+                <path id="edge-config-training" class="pipeline-edge" d="M 700 56 C 750 56, 770 56, 820 56"></path>
+                <path id="edge-training-metrics" class="pipeline-edge" d="M 895 80 C 930 118, 930 145, 895 170"></path>
+                <path id="edge-training-generate" class="pipeline-edge" d="M 820 130 C 750 160, 640 164, 550 168"></path>
+              </svg>
+
+              <div id="node-dataset" class="pipeline-node" style="left: 10px; top: 24px">
+                <div class="k">01</div>
+                <div class="v">Dataset</div>
+              </div>
+              <div id="node-tokenizer" class="pipeline-node" style="left: 280px; top: 24px">
+                <div class="k">02</div>
+                <div class="v">Tokenizer</div>
+              </div>
+              <div id="node-config" class="pipeline-node" style="left: 550px; top: 24px">
+                <div class="k">03</div>
+                <div class="v">Model Config</div>
+              </div>
+              <div id="node-training" class="pipeline-node" style="left: 820px; top: 24px">
+                <div class="k">04</div>
+                <div class="v">Training</div>
+              </div>
+              <div id="node-generate" class="pipeline-node" style="left: 550px; top: 136px">
+                <div class="k">05</div>
+                <div class="v">Generate</div>
+              </div>
+              <div id="node-metrics" class="pipeline-node" style="left: 820px; top: 136px">
+                <div class="k">06</div>
+                <div class="v">Metrics</div>
+              </div>
+            </div>
+          </div>
+          <div class="hint">Visual state follows the live wasm worker pipeline.</div>
+        </section>
+
         <section class="card span-4">
           <h3>Dataset</h3>
           <div class="row">

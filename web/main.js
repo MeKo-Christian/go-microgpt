@@ -39,6 +39,17 @@ const els = {
   stepTimeChartLine: document.getElementById("stepTimeChartLine"),
   samplesList: document.getElementById("samplesList"),
   logBox: document.getElementById("logBox"),
+  nodeDataset: document.getElementById("node-dataset"),
+  nodeTokenizer: document.getElementById("node-tokenizer"),
+  nodeConfig: document.getElementById("node-config"),
+  nodeTraining: document.getElementById("node-training"),
+  nodeGenerate: document.getElementById("node-generate"),
+  nodeMetrics: document.getElementById("node-metrics"),
+  edgeDatasetTokenizer: document.getElementById("edge-dataset-tokenizer"),
+  edgeTokenizerConfig: document.getElementById("edge-tokenizer-config"),
+  edgeConfigTraining: document.getElementById("edge-config-training"),
+  edgeTrainingMetrics: document.getElementById("edge-training-metrics"),
+  edgeTrainingGenerate: document.getElementById("edge-training-generate"),
 };
 
 const state = {
@@ -70,6 +81,34 @@ function setButtons() {
   els.trainBtn.disabled = !state.wasmReady || !state.datasetReady || !state.modelReady || state.training;
   els.stopBtn.disabled = !state.training;
   els.generateBtn.disabled = !state.modelReady || state.training;
+  updatePipelineDiagram();
+}
+
+function setActive(el, active) {
+  if (!el) return;
+  el.classList.toggle("active", !!active);
+}
+
+function updatePipelineDiagram() {
+  const dataset = state.datasetReady;
+  const tokenizer = state.datasetReady;
+  const config = state.datasetReady;
+  const training = state.training || state.modelReady;
+  const metrics = state.training || state.modelReady;
+  const generate = state.modelReady;
+
+  setActive(els.nodeDataset, dataset);
+  setActive(els.nodeTokenizer, tokenizer);
+  setActive(els.nodeConfig, config);
+  setActive(els.nodeTraining, training);
+  setActive(els.nodeMetrics, metrics);
+  setActive(els.nodeGenerate, generate);
+
+  setActive(els.edgeDatasetTokenizer, dataset && tokenizer);
+  setActive(els.edgeTokenizerConfig, tokenizer && config);
+  setActive(els.edgeConfigTraining, config && training);
+  setActive(els.edgeTrainingMetrics, training && metrics);
+  setActive(els.edgeTrainingGenerate, training && generate);
 }
 
 function formatMs(ms) {
