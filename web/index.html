@@ -225,6 +225,43 @@
         white-space: pre-wrap;
       }
 
+      .charts {
+        margin-top: 10px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .chart {
+        border: 1px solid #3a5f7c;
+        border-radius: 10px;
+        padding: 6px;
+        background: #071321;
+      }
+
+      .chart .k {
+        color: var(--muted);
+        font-size: 0.75rem;
+        margin-bottom: 4px;
+      }
+
+      .chart svg {
+        width: 100%;
+        height: 74px;
+        display: block;
+      }
+
+      .chart path.line {
+        fill: none;
+        stroke-width: 2;
+      }
+
+      .chart path.grid {
+        fill: none;
+        stroke: #2f4f67;
+        stroke-width: 1;
+      }
+
       .hint {
         margin-top: 8px;
         font-size: 0.8rem;
@@ -310,6 +347,22 @@
             <div class="metric"><div class="k">State</div><div class="v" id="stateValue">idle</div></div>
           </div>
           <div class="live" id="liveSample">(live sample will appear here)</div>
+          <div class="charts">
+            <div class="chart">
+              <div class="k">Loss Trend</div>
+              <svg viewBox="0 0 100 30" preserveAspectRatio="none">
+                <path class="grid" d="M0 15 L100 15"></path>
+                <path id="lossChartLine" class="line" stroke="#62deff"></path>
+              </svg>
+            </div>
+            <div class="chart">
+              <div class="k">Step Time Trend</div>
+              <svg viewBox="0 0 100 30" preserveAspectRatio="none">
+                <path class="grid" d="M0 15 L100 15"></path>
+                <path id="stepTimeChartLine" class="line" stroke="#7df8b8"></path>
+              </svg>
+            </div>
+          </div>
           <div class="hint">
             Inference is autoregressive and training is CPU-only in your browser tab.
           </div>
@@ -317,6 +370,10 @@
 
         <section class="card span-5">
           <h3>Generated Samples</h3>
+          <div class="two" style="margin-bottom: 8px">
+            <label>Prompt <input id="promptInput" type="text" placeholder="optional prompt..." /></label>
+            <label>Count <input id="sampleCount" type="number" min="1" max="32" value="12" /></label>
+          </div>
           <ul class="samples" id="samplesList"></ul>
         </section>
 

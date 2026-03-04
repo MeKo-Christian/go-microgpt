@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"sync"
@@ -67,7 +68,7 @@ func defaultTrainOptions() trainOptions {
 
 func main() {
 	kernel := map[string]any{
-		"version":     "0.1.0-wasm",
+		"version":     "0.2.0-wasm",
 		"loadDataset": js.FuncOf(loadDataset),
 		"initModel":   js.FuncOf(initModel),
 		"train":       js.FuncOf(trainAsync),
@@ -206,10 +207,14 @@ func generateAsync(_ js.Value, args []js.Value) any {
 		resolve := pArgs[0]
 		reject := pArgs[1]
 
+		prompt := ""
 		count := 8
 		temp := 0.5
 		if len(args) > 0 && args[0].Type() == js.TypeObject {
 			v := args[0]
+			if x := v.Get("prompt"); x.Type() == js.TypeString {
+				prompt = x.String()
+			}
 			if x := pickNumber(v, "count", "numSamples", "samples"); x > 0 {
 				count = int(x)
 			}
@@ -219,7 +224,7 @@ func generateAsync(_ js.Value, args []js.Value) any {
 		}
 
 		go func() {
-			res, err := runGenerate(count, temp)
+			res, err := runGenerate(prompt, count, temp)
 			if err != nil {
 				reject.Invoke(err.Error())
 				return
@@ -276,6 +281,8 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 
 	adam := microgpt.NewAdam(len(model.Params), opts.LearningRate, opts.Beta1, opts.Beta2, opts.EpsAdam)
 	start := time.Now()
+	lossHistory := make([]float64, 0, opts.NumSteps)
+	stepTimeHistory := make([]float64, 0, opts.NumSteps)
 
 	for step := 0; step < opts.NumSteps; step++ {
 		if state.stopRequested.Load() {
@@ -326,15 +333,25 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 			}
 		}
 
+		stepTimeMs := float64(time.Since(stepStart).Milliseconds())
+		lossHistory = append(lossHistory, loss.Data)
+		stepTimeHistory = append(stepTimeHistory, stepTimeMs)
+
 		if progressCB.Type() == js.TypeFunction {
 			payload := map[string]any{
 				"step":       step + 1,
 				"totalSteps": opts.NumSteps,
 				"loss":       loss.Data,
-				"stepTimeMs": time.Since(stepStart).Milliseconds(),
+				"stepTimeMs": int64(stepTimeMs),
 				"elapsedMs":  time.Since(start).Milliseconds(),
 				"sample":     sample,
 			}
+
+			if step%5 == 0 || step == opts.NumSteps-1 {
+				payload["lossSeries"] = floatSliceToAny(sparklineSeries(lossHistory, 140, true))
+				payload["stepTimeSeries"] = floatSliceToAny(sparklineSeries(stepTimeHistory, 140, false))
+			}
+
 			safeInvoke(progressCB, payload)
 		}
 
@@ -352,14 +369,16 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 	}
 
 	return map[string]any{
-		"stopped":     false,
-		"samples":     stringSliceToAny(samples),
-		"totalSteps":  opts.NumSteps,
-		"totalTimeMs": time.Since(start).Milliseconds(),
+		"stopped":        false,
+		"samples":        stringSliceToAny(samples),
+		"lossSeries":     floatSliceToAny(sparklineSeries(lossHistory, 140, true)),
+		"stepTimeSeries": floatSliceToAny(sparklineSeries(stepTimeHistory, 140, false)),
+		"totalSteps":     opts.NumSteps,
+		"totalTimeMs":    time.Since(start).Milliseconds(),
 	}, nil
 }
 
-func runGenerate(count int, temp float64) (map[string]any, error) {
+func runGenerate(prompt string, count int, temp float64) (map[string]any, error) {
 	if count <= 0 {
 		return nil, fmt.Errorf("count must be > 0, got %d", count)
 	}
@@ -380,15 +399,14 @@ func runGenerate(count int, temp float64) (map[string]any, error) {
 		return nil, errors.New("model is not ready")
 	}
 
-	out, err := microgpt.GenerateSamples(model, tokenizer, microgpt.SampleOptions{
-		NumSamples:  count,
-		Temperature: temp,
-	}, rng)
-	if err != nil {
-		return nil, err
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		sample := generateWithPrompt(model, tokenizer, prompt, temp, rng)
+		out = append(out, sample)
 	}
 
 	return map[string]any{
+		"prompt":  prompt,
 		"samples": stringSliceToAny(out),
 	}, nil
 }
@@ -494,6 +512,125 @@ func stringSliceToAny(xs []string) []any {
 		out[i] = x
 	}
 	return out
+}
+
+func floatSliceToAny(xs []float64) []any {
+	out := make([]any, len(xs))
+	for i, x := range xs {
+		out[i] = x
+	}
+	return out
+}
+
+func sparklineSeries(values []float64, maxPoints int, useEMA bool) []float64 {
+	if len(values) == 0 || maxPoints <= 0 {
+		return []float64{}
+	}
+
+	step := int(math.Ceil(float64(len(values)) / float64(maxPoints)))
+	if step < 1 {
+		step = 1
+	}
+
+	reduced := make([]float64, 0, maxPoints)
+	for i := 0; i < len(values); i += step {
+		reduced = append(reduced, values[i])
+	}
+	if reduced[len(reduced)-1] != values[len(values)-1] {
+		reduced = append(reduced, values[len(values)-1])
+	}
+
+	series := reduced
+	if useEMA && len(reduced) > 1 {
+		ema := reduced[0]
+		series = make([]float64, len(reduced))
+		series[0] = ema
+		for i := 1; i < len(reduced); i++ {
+			ema = 0.93*ema + 0.07*reduced[i]
+			series[i] = ema
+		}
+	}
+
+	minV, maxV := series[0], series[0]
+	for _, v := range series[1:] {
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+	}
+	span := maxV - minV
+	if span == 0 {
+		out := make([]float64, len(series))
+		for i := range out {
+			out[i] = 0.5
+		}
+		return out
+	}
+
+	out := make([]float64, len(series))
+	for i, v := range series {
+		out[i] = (v - minV) / span
+	}
+	return out
+}
+
+func generateWithPrompt(model *microgpt.Model, tokenizer *microgpt.Tokenizer, prompt string, temperature float64, rng *rand.Rand) string {
+	cfg := model.Config()
+	if temperature <= 0 {
+		temperature = 0.5
+	}
+
+	lookup := make(map[rune]int, len(tokenizer.Chars))
+	for i, ch := range tokenizer.Chars {
+		lookup[ch] = i
+	}
+
+	keys := microgpt.NewKVCache(cfg.NLayer)
+	tokenID := tokenizer.BOS
+	posID := 0
+	logits := model.ForwardToken(tokenID, posID, keys)
+	posID++
+
+	promptRunes := []rune(prompt)
+	for _, ch := range promptRunes {
+		id, ok := lookup[ch]
+		if !ok || posID >= cfg.BlockSize {
+			continue
+		}
+		tokenID = id
+		logits = model.ForwardToken(tokenID, posID, keys)
+		posID++
+	}
+
+	outRunes := make([]rune, 0, cfg.BlockSize)
+	outRunes = append(outRunes, promptRunes...)
+	for posID < cfg.BlockSize {
+		tokenID = sampleToken(logits, temperature, rng)
+		if tokenID == tokenizer.BOS {
+			break
+		}
+		outRunes = append(outRunes, tokenizer.Chars[tokenID])
+		logits = model.ForwardToken(tokenID, posID, keys)
+		posID++
+	}
+
+	return string(outRunes)
+}
+
+func sampleToken(logits microgpt.Vec, temperature float64, rng *rand.Rand) int {
+	scaled := make(microgpt.Vec, len(logits))
+	invTemp := 1.0 / temperature
+	for i, l := range logits {
+		scaled[i] = l.MulScalar(invTemp)
+	}
+	probs := microgpt.Softmax(scaled)
+	weights := make([]float64, len(probs))
+	for i, p := range probs {
+		weights[i] = p.Data
+	}
+	return microgpt.SampleWeighted(rng, weights)
 }
 
 func min(a, b int) int {

@@ -6,8 +6,7 @@ The original project distills everything needed to understand a modern language 
 
 ## Try Online
 
-- **GitHub Pages demo:** `https://<your-github-username>.github.io/go-microgpt/`
-- The site is built/deployed by [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml) on pushes to `main`.
+- **GitHub Pages demo:** `https://meko-christian.github.io/go-microgpt/`
 - **Run locally:**
 
 ```bash

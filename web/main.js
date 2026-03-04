@@ -25,6 +25,8 @@ const els = {
   trainBtn: document.getElementById("trainBtn"),
   stopBtn: document.getElementById("stopBtn"),
   generateBtn: document.getElementById("generateBtn"),
+  promptInput: document.getElementById("promptInput"),
+  sampleCount: document.getElementById("sampleCount"),
   progressFill: document.getElementById("progressFill"),
   stepValue: document.getElementById("stepValue"),
   lossValue: document.getElementById("lossValue"),
@@ -33,6 +35,8 @@ const els = {
   paramCount: document.getElementById("paramCount"),
   stateValue: document.getElementById("stateValue"),
   liveSample: document.getElementById("liveSample"),
+  lossChartLine: document.getElementById("lossChartLine"),
+  stepTimeChartLine: document.getElementById("stepTimeChartLine"),
   samplesList: document.getElementById("samplesList"),
   logBox: document.getElementById("logBox"),
 };
@@ -107,6 +111,8 @@ function resetTrainingStats() {
   els.stepTimeValue.textContent = "-";
   els.elapsedValue.textContent = "-";
   els.liveSample.textContent = "(live sample will appear here)";
+  els.lossChartLine.setAttribute("d", "");
+  els.stepTimeChartLine.setAttribute("d", "");
 }
 
 function renderSamples(samples) {
@@ -116,6 +122,25 @@ function renderSamples(samples) {
     li.textContent = sample || "(empty)";
     els.samplesList.appendChild(li);
   }
+}
+
+function renderSeriesPath(pathEl, series) {
+  if (!Array.isArray(series) || series.length === 0) {
+    pathEl.setAttribute("d", "");
+    return;
+  }
+  if (series.length === 1) {
+    pathEl.setAttribute("d", `M 0 ${30 - Number(series[0]) * 30} L 100 ${30 - Number(series[0]) * 30}`);
+    return;
+  }
+
+  const points = [];
+  for (let i = 0; i < series.length; i++) {
+    const x = (i / (series.length - 1)) * 100;
+    const y = 30 - Math.max(0, Math.min(1, Number(series[i] || 0))) * 30;
+    points.push(`${x.toFixed(2)} ${y.toFixed(2)}`);
+  }
+  pathEl.setAttribute("d", `M ${points.join(" L ")}`);
 }
 
 async function bootWasm() {
@@ -238,6 +263,12 @@ async function train() {
     if (m.sample) {
       els.liveSample.textContent = m.sample;
     }
+    if (Array.isArray(m.lossSeries)) {
+      renderSeriesPath(els.lossChartLine, m.lossSeries);
+    }
+    if (Array.isArray(m.stepTimeSeries)) {
+      renderSeriesPath(els.stepTimeChartLine, m.stepTimeSeries);
+    }
   };
 
   try {
@@ -248,6 +279,8 @@ async function train() {
     } else {
       setStateText("trained");
       renderSamples(result.samples || []);
+      renderSeriesPath(els.lossChartLine, result.lossSeries || []);
+      renderSeriesPath(els.stepTimeChartLine, result.stepTimeSeries || []);
       log(`training completed in ${formatMs(Number(result.totalTimeMs || 0))}`);
     }
   } finally {
@@ -260,10 +293,16 @@ async function generate() {
   if (!state.modelReady) return;
   setStateText("sampling");
   const temp = parseFloatSafe(els.temperature.value, 0.5);
-  const out = await state.kernel.generate({ count: 12, temperature: temp });
+  const count = parseIntSafe(els.sampleCount.value, 12);
+  const prompt = els.promptInput.value || "";
+  const out = await state.kernel.generate({ count, temperature: temp, prompt });
   renderSamples(out.samples || []);
   setStateText("trained");
-  log("generated new samples");
+  if (prompt.trim() !== "") {
+    log(`generated ${count} samples with prompt="${prompt}"`);
+  } else {
+    log(`generated ${count} samples`);
+  }
 }
 
 function stop() {
