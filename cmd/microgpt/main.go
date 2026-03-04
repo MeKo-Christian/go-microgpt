@@ -13,6 +13,9 @@ func main() {
 	var (
 		inputPath  string
 		seed       int64
+		fast       bool
+		batchSize  int
+		parallel   bool
 		modelCfg   = microgpt.ModelConfig{NLayer: 1, NEmbd: 16, BlockSize: 16, NHead: 4}
 		trainOpts  = microgpt.DefaultTrainOptions()
 		sampleOpts = microgpt.DefaultSampleOptions()
@@ -51,24 +54,57 @@ func main() {
 			tokenizer := microgpt.NewTokenizer(docs)
 			fmt.Printf("vocab size: %d\n", tokenizer.VocabSize())
 
-			model := microgpt.NewModel(modelCfg, tokenizer.VocabSize(), rng)
-			fmt.Printf("num params: %d\n", len(model.Params))
+			if fast {
+				// Use tensor-based fast training path.
+				cfg := microgpt.TensorConfig{
+					DModel:    modelCfg.NEmbd,
+					NHeads:    modelCfg.NHead,
+					DFF:       4 * modelCfg.NEmbd,
+					VocabSize: tokenizer.VocabSize(),
+					BlockSize: modelCfg.BlockSize,
+					Batch:     batchSize,
+				}
+				tm := microgpt.NewTensorModel(cfg, rng)
+				fmt.Printf("num params (tensor): %d\n", len(tm.AllParams()))
 
-			err = microgpt.Train(model, tokenizer, docs, trainOpts, func(metrics microgpt.StepMetrics) {
-				fmt.Printf("step %4d / %4d | loss %.4f\r", metrics.Step, metrics.Total, metrics.Loss)
-			})
-			if err != nil {
-				return fmt.Errorf("train model: %w", err)
-			}
+				trainFn := microgpt.TensorTrain
+				if parallel {
+					trainFn = microgpt.TensorTrainParallel
+				}
 
-			fmt.Println("\n--- inference (new, hallucinated names) ---")
-			samples, err := microgpt.GenerateSamples(model, tokenizer, sampleOpts, rng)
-			if err != nil {
-				return fmt.Errorf("generate samples: %w", err)
-			}
+				err = trainFn(tm, tokenizer, docs, trainOpts, func(metrics microgpt.StepMetrics) {
+					fmt.Printf("step %4d / %4d | loss %.4f\r", metrics.Step, metrics.Total, metrics.Loss)
+				})
+				if err != nil {
+					return fmt.Errorf("train model: %w", err)
+				}
 
-			for i, sample := range samples {
-				fmt.Printf("sample %2d: %s\n", i+1, sample)
+				fmt.Println("\n--- inference (new, hallucinated names) ---")
+				samples := microgpt.GenerateFast(tm, tokenizer, sampleOpts, rng)
+				for i, sample := range samples {
+					fmt.Printf("sample %2d: %s\n", i+1, sample)
+				}
+			} else {
+				// Use original autograd training path.
+				model := microgpt.NewModel(modelCfg, tokenizer.VocabSize(), rng)
+				fmt.Printf("num params: %d\n", len(model.Params))
+
+				err = microgpt.Train(model, tokenizer, docs, trainOpts, func(metrics microgpt.StepMetrics) {
+					fmt.Printf("step %4d / %4d | loss %.4f\r", metrics.Step, metrics.Total, metrics.Loss)
+				})
+				if err != nil {
+					return fmt.Errorf("train model: %w", err)
+				}
+
+				fmt.Println("\n--- inference (new, hallucinated names) ---")
+				samples, err := microgpt.GenerateSamples(model, tokenizer, sampleOpts, rng)
+				if err != nil {
+					return fmt.Errorf("generate samples: %w", err)
+				}
+
+				for i, sample := range samples {
+					fmt.Printf("sample %2d: %s\n", i+1, sample)
+				}
 			}
 			return nil
 		},
@@ -84,6 +120,10 @@ func main() {
 	cmd.Flags().IntVar(&modelCfg.NEmbd, "n-embd", modelCfg.NEmbd, "embedding dimension")
 	cmd.Flags().IntVar(&modelCfg.BlockSize, "block-size", modelCfg.BlockSize, "maximum context length")
 	cmd.Flags().IntVar(&modelCfg.NHead, "n-head", modelCfg.NHead, "number of attention heads")
+
+	cmd.Flags().BoolVar(&fast, "fast", false, "use tensor-based fast training (explicit fwd/bwd, SIMD)")
+	cmd.Flags().IntVar(&batchSize, "batch", 16, "batch size (only used with --fast)")
+	cmd.Flags().BoolVar(&parallel, "parallel", false, "use goroutine parallelism (only with --fast)")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
