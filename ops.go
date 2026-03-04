@@ -1,6 +1,13 @@
 package microgpt
 
-import "math"
+import (
+	"math"
+)
+
+// dotF32 dispatches to the SIMD DotF32 (pointer-based) when available.
+func dotF32(a, b []float32, n int) float32 {
+	return DotF32(&a[0], &b[0], n)
+}
 
 // DotF32Go computes the dot product of two float32 slices.
 func DotF32Go(a, b []float32, n int) float32 {
@@ -14,7 +21,7 @@ func DotF32Go(a, b []float32, n int) float32 {
 // MatVecF32 computes y[j] = sum_i W[j*inDim+i] * x[i] for j in [0, outDim).
 func MatVecF32(y, W, x []float32, outDim, inDim int) {
 	for j := range outDim {
-		y[j] = DotF32Go(W[j*inDim:], x, inDim)
+		y[j] = dotF32(W[j*inDim:], x, inDim)
 	}
 }
 
@@ -37,7 +44,7 @@ func MatVec2F32(y0, y1, W, x0, x1 []float32, outDim, inDim int) {
 // preRelu stores the linear output before ReLU (needed for backward pass).
 func MatVecReLUF32(preRelu, hidden, W, x []float32, outDim, inDim int) {
 	for j := range outDim {
-		v := DotF32Go(W[j*inDim:], x, inDim)
+		v := dotF32(W[j*inDim:], x, inDim)
 		preRelu[j] = v
 		if v > 0 {
 			hidden[j] = v
@@ -50,17 +57,14 @@ func MatVecReLUF32(preRelu, hidden, W, x []float32, outDim, inDim int) {
 // MatVecResidualF32 computes y[j] = base[j] + sum_i W[j*inDim+i]*x[i].
 func MatVecResidualF32(y, base, W, x []float32, outDim, inDim int) {
 	for j := range outDim {
-		y[j] = base[j] + DotF32Go(W[j*inDim:], x, inDim)
+		y[j] = base[j] + dotF32(W[j*inDim:], x, inDim)
 	}
 }
 
 // RMSNormF32 computes RMS normalization: out[i] = x[i] / rms, returns the rms value.
 // rms = sqrt(mean(x^2) + eps) where eps = 1e-8
 func RMSNormF32(out, x []float32, n int) float32 {
-	var sumSq float32
-	for i := range n {
-		sumSq += x[i] * x[i]
-	}
+	sumSq := dotF32(x, x, n)
 	rms := float32(math.Sqrt(float64(sumSq/float32(n)) + 1e-8))
 	invRms := 1.0 / rms
 	for i := range n {
