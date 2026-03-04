@@ -158,12 +158,22 @@ async function loadDatasetFromText(text) {
   state.modelReady = false;
   els.docsCount.textContent = String(result.numDocs);
   els.vocabSize.textContent = String(result.vocabSize);
+
+  const suggested = Math.min(3000, Math.max(500, result.numDocs * 3));
+  const rounded = Math.round(suggested / 50) * 50;
+  els.steps.value = String(rounded);
+
   setDatasetStatus(`loaded ${result.numDocs} docs / vocab ${result.vocabSize}`);
   setStateText("dataset ready");
   resetTrainingStats();
   renderSamples([]);
   els.paramCount.textContent = "-";
   setButtons();
+
+  log(`dataset stats: docs=${result.numDocs}, vocab=${result.vocabSize}, suggested_steps=${rounded}`);
+  if (Array.isArray(result.sampleDocs) && result.sampleDocs.length > 0) {
+    log(`sample docs: ${result.sampleDocs.slice(0, 3).join(" | ")}`);
+  }
 }
 
 async function loadPreset() {

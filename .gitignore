@@ -21,3 +21,9 @@ coverage.html
 
 # Local data/downloads
 input.txt
+
+#Cache files
+.cache/
+
+#AI Agents
+.claude/
