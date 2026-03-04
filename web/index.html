@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MicroGPT Web Demo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        --bg-a: #061a23;
+        --bg-b: #0f2d40;
+        --panel: #0d1f30ee;
+        --line: #3f6f90;
+        --text: #dbeeff;
+        --muted: #99b7cc;
+        --accent: #6ee7ff;
+        --accent-ink: #06212a;
+        --ok: #51d69a;
+        --warn: #ffd166;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--text);
+        font-family: "Space Grotesk", sans-serif;
+        background:
+          radial-gradient(900px 460px at 10% -8%, #2a8bc655, transparent),
+          radial-gradient(780px 420px at 88% 115%, #45a36d3d, transparent),
+          linear-gradient(140deg, var(--bg-a), var(--bg-b));
+      }
+
+      .wrap {
+        width: min(1150px, 100%);
+        margin: 0 auto;
+        padding: 18px 16px 30px;
+      }
+
+      .mast {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin-bottom: 14px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.3rem, 2.8vw, 2rem);
+        letter-spacing: 0.02em;
+      }
+
+      .sub {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .mono {
+        font-family: "IBM Plex Mono", monospace;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px;
+        box-shadow: 0 6px 24px #06131d66;
+      }
+
+      .span-4 { grid-column: span 4; }
+      .span-5 { grid-column: span 5; }
+      .span-7 { grid-column: span 7; }
+      .span-8 { grid-column: span 8; }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      label {
+        font-size: 0.86rem;
+        color: var(--muted);
+      }
+
+      select,
+      input[type="number"],
+      input[type="text"],
+      input[type="range"],
+      button,
+      textarea {
+        font: inherit;
+      }
+
+      select,
+      input[type="number"],
+      input[type="text"],
+      textarea {
+        width: 100%;
+        background: #07111ccc;
+        color: var(--text);
+        border: 1px solid #3a5870;
+        border-radius: 10px;
+        padding: 8px 9px;
+      }
+
+      textarea {
+        min-height: 90px;
+        resize: vertical;
+      }
+
+      .two {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+      }
+
+      button {
+        border-radius: 999px;
+        border: 1px solid #7ec6dd;
+        padding: 8px 14px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button.alt {
+        background: #0d2535;
+        border-color: #4f7ea0;
+        color: #c6e4f8;
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 8px;
+      }
+
+      .metric {
+        background: #08131f;
+        border: 1px solid #355874;
+        border-radius: 10px;
+        padding: 8px;
+      }
+
+      .metric .k {
+        color: var(--muted);
+        font-size: 0.75rem;
+        margin-bottom: 2px;
+      }
+
+      .metric .v {
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 0.95rem;
+      }
+
+      .status {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .status strong {
+        color: var(--text);
+      }
+
+      .progress {
+        margin-top: 8px;
+        height: 9px;
+        border-radius: 999px;
+        border: 1px solid #3a607c;
+        overflow: hidden;
+        background: #06111c;
+      }
+
+      .progress > div {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #47d1ff, #6effbd);
+        transition: width 0.15s ease;
+      }
+
+      ul.samples {
+        margin: 8px 0 0;
+        padding-left: 18px;
+        max-height: 250px;
+        overflow: auto;
+      }
+
+      ul.samples li {
+        margin: 2px 0;
+        font-family: "IBM Plex Mono", monospace;
+      }
+
+      .live {
+        margin-top: 8px;
+        padding: 8px;
+        border-radius: 10px;
+        border: 1px solid #466e8d;
+        background: #081726;
+        min-height: 44px;
+        font-family: "IBM Plex Mono", monospace;
+        white-space: pre-wrap;
+      }
+
+      .hint {
+        margin-top: 8px;
+        font-size: 0.8rem;
+        color: #9ec5de;
+      }
+
+      a {
+        color: #90ddf5;
+      }
+
+      @media (max-width: 980px) {
+        .span-4,
+        .span-5,
+        .span-7,
+        .span-8 {
+          grid-column: span 12;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="mast">
+        <div>
+          <h1>MicroGPT Browser Lab</h1>
+          <p class="sub">Train a tiny GPT from scratch in your browser using Go + WebAssembly.</p>
+        </div>
+        <div class="sub mono">karpathy microgpt style, wasm runtime</div>
+      </div>
+
+      <div class="grid">
+        <section class="card span-4">
+          <h3>Dataset</h3>
+          <div class="row">
+            <label for="datasetSelect">Preset</label>
+          </div>
+          <select id="datasetSelect">
+            <option value="">Choose dataset...</option>
+            <option value="names">Baby Names</option>
+            <option value="dinos">Dinosaurs</option>
+            <option value="words">English Words</option>
+            <option value="ycstartups">YC Startups</option>
+          </select>
+          <div class="row" style="margin-top: 8px">
+            <button id="loadPresetBtn">Load Preset</button>
+            <button id="loadUploadBtn" class="alt">Load File</button>
+            <input id="uploadFile" type="file" accept=".txt,.csv" style="display: none" />
+          </div>
+          <div class="metrics">
+            <div class="metric"><div class="k">Docs</div><div class="v" id="docsCount">-</div></div>
+            <div class="metric"><div class="k">Vocab</div><div class="v" id="vocabSize">-</div></div>
+          </div>
+          <div class="status" id="datasetStatus"><strong>Status:</strong> waiting for dataset</div>
+        </section>
+
+        <section class="card span-8">
+          <h3>Training Config</h3>
+          <div class="two">
+            <label>N Layer <input id="nLayer" type="number" min="1" max="6" value="1" /></label>
+            <label>N Embd <input id="nEmbd" type="number" min="4" max="128" value="16" /></label>
+            <label>N Head <input id="nHead" type="number" min="1" max="16" value="4" /></label>
+            <label>Block Size <input id="blockSize" type="number" min="4" max="64" value="16" /></label>
+            <label>Steps <input id="steps" type="number" min="1" max="10000" value="1000" /></label>
+            <label>Seed <input id="seed" type="number" min="1" value="42" /></label>
+            <label>Learning Rate <input id="learningRate" type="number" min="0.0001" step="0.0001" value="0.01" /></label>
+            <label>Temperature <input id="temperature" type="number" min="0.1" step="0.1" value="0.5" /></label>
+          </div>
+
+          <div class="row" style="margin-top: 10px">
+            <button id="initBtn" class="alt">Initialize Model</button>
+            <button id="trainBtn">Train</button>
+            <button id="stopBtn" class="alt" disabled>Stop</button>
+            <button id="generateBtn" class="alt" disabled>Generate</button>
+          </div>
+
+          <div class="progress"><div id="progressFill"></div></div>
+          <div class="metrics">
+            <div class="metric"><div class="k">Step</div><div class="v" id="stepValue">0 / 0</div></div>
+            <div class="metric"><div class="k">Loss</div><div class="v" id="lossValue">-</div></div>
+            <div class="metric"><div class="k">Step Time</div><div class="v" id="stepTimeValue">-</div></div>
+            <div class="metric"><div class="k">Elapsed</div><div class="v" id="elapsedValue">-</div></div>
+            <div class="metric"><div class="k">Params</div><div class="v" id="paramCount">-</div></div>
+            <div class="metric"><div class="k">State</div><div class="v" id="stateValue">idle</div></div>
+          </div>
+          <div class="live" id="liveSample">(live sample will appear here)</div>
+          <div class="hint">
+            Inference is autoregressive and training is CPU-only in your browser tab.
+          </div>
+        </section>
+
+        <section class="card span-5">
+          <h3>Generated Samples</h3>
+          <ul class="samples" id="samplesList"></ul>
+        </section>
+
+        <section class="card span-7">
+          <h3>Session Log</h3>
+          <textarea id="logBox" readonly></textarea>
+          <p class="hint">
+            Inspired by
+            <a href="https://github.com/jayyvk/trainmyowngpt" target="_blank" rel="noreferrer">trainmyowngpt</a>
+            and based on
+            <a href="https://gist.github.com/karpathy/8627fe009c40f57531cb18360106ce95" target="_blank" rel="noreferrer">karpathy's microgpt</a>.
+          </p>
+        </section>
+      </div>
+    </div>
+
+    <script src="./wasm_exec.js"></script>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

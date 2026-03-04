@@ -1,0 +1,32 @@
+[global]
+excludes = [
+    "**/.git/**",
+    "**/.gitignore",
+
+    # Go module files are managed by go tooling.
+    "go.mod",
+    "go.sum",
+
+    # Generated artifacts.
+    "coverage.out",
+    "coverage.html",
+    "bin/**",
+    ".cache/**",
+    "go-microgpt",
+]
+
+[formatter.gofumpt]
+command = "gofumpt"
+options = ["-w"]
+includes = ["**/*.go"]
+
+[formatter.gci]
+command = "gci"
+options = ["write"]
+includes = ["**/*.go"]
+priority = 1
+
+[formatter.shfmt]
+command = "shfmt"
+options = ["-s", "-w"]
+includes = ["**/*.sh"]

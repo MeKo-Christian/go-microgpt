@@ -1,0 +1,23 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Module/workspace outputs
+bin/
+go-microgpt
+web/dist/
+
+# Coverage artifacts
+coverage.out
+coverage.html
+
+# Local tool caches
+.cache/
+
+# Local data/downloads
+input.txt

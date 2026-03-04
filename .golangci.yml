@@ -1,0 +1,22 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: standard
+  disable:
+    - gosec # math/rand sampling and simple downloader are intentional here
+    - revive # too noisy for this small sample project
+
+  exclusions:
+    generated: lax
+    presets: [comments, common-false-positives, legacy, std-error-handling]
+
+formatters:
+  enable:
+    - gofmt
