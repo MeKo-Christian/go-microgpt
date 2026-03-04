@@ -233,6 +233,46 @@ func TestTensorTrainConverges(t *testing.T) {
 	}
 }
 
+func TestTensorTrainParallelConverges(t *testing.T) {
+	cfg := TensorConfig{
+		DModel:    16,
+		NHeads:    4,
+		DFF:       64,
+		VocabSize: 0, // set below
+		BlockSize: 16,
+		Batch:     4, // must be divisible by worker count
+	}
+
+	docs := []string{"ab", "cd", "ef", "gh"}
+	tokenizer := NewTokenizer(docs)
+	cfg.VocabSize = tokenizer.VocabSize()
+
+	rng := rand.New(rand.NewSource(42))
+	m := NewTensorModel(cfg, rng)
+
+	opts := TrainOptions{
+		NumSteps:     200,
+		LearningRate: 0.005,
+		Beta1:        0.85,
+		Beta2:        0.99,
+		EpsAdam:      1e-8,
+	}
+
+	var firstLoss, lastLoss float64
+	err := TensorTrainParallel(m, tokenizer, docs, opts, func(metrics StepMetrics) {
+		if metrics.Step == 1 {
+			firstLoss = metrics.Loss
+		}
+		lastLoss = metrics.Loss
+	})
+	if err != nil {
+		t.Fatalf("TensorTrainParallel failed: %v", err)
+	}
+	if lastLoss >= firstLoss {
+		t.Fatalf("loss should decrease: first=%f, last=%f", firstLoss, lastLoss)
+	}
+}
+
 func TestGenerateFastProducesOutput(t *testing.T) {
 	cfg := smallTestConfig()
 	rng := rand.New(rand.NewSource(42))

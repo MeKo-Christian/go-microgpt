@@ -18,7 +18,7 @@ import (
 // that have a valid next-token target (i.e., positions 0..SeqLens[b]-2).
 func Forward(m *TensorModel, c *TensorCache) float32 {
 	cfg := m.Cfg
-	B := cfg.Batch
+	B := len(c.SeqLens) // batch size from cache, not model config
 	T := cfg.BlockSize
 	D := cfg.DModel
 	H := cfg.NHeads
@@ -214,7 +214,7 @@ func transposedMatVec(y, W, x []float32, rows, cols int) {
 // Assumes Forward has been called and c is populated.
 func Backward(m *TensorModel, c *TensorCache, g *TensorGrads) {
 	cfg := m.Cfg
-	B := cfg.Batch
+	B := len(c.SeqLens) // batch size from cache, not model config
 	T := cfg.BlockSize
 	D := cfg.DModel
 	H := cfg.NHeads
@@ -589,10 +589,7 @@ func TensorTrainParallel(m *TensorModel, tokenizer *Tokenizer, docs []string, op
 	cfg := m.Cfg
 
 	// Determine number of workers: largest P <= GOMAXPROCS that divides Batch.
-	P := runtime.GOMAXPROCS(0)
-	if P > cfg.Batch {
-		P = cfg.Batch
-	}
+	P := min(runtime.GOMAXPROCS(0), cfg.Batch)
 	for cfg.Batch%P != 0 {
 		P--
 	}
