@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
+	"sync"
 )
 
 // ---------------------------------------------------------------------------
@@ -554,6 +556,143 @@ func TensorTrain(m *TensorModel, tokenizer *Tokenizer, docs []string, opts Train
 				Step:  step + 1,
 				Total: opts.NumSteps,
 				Loss:  float64(loss),
+			})
+		}
+	}
+
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Parallel training loop
+// ---------------------------------------------------------------------------
+
+// TensorTrainParallel runs batched training with goroutine parallelism.
+// The batch is split across P = min(GOMAXPROCS, cfg.Batch) workers.
+// Each worker has its own TensorCache and TensorGrads (no contention).
+// The model weights are shared (read-only during fwd/bwd); only the main
+// goroutine mutates them via Adam after gradient accumulation.
+func TensorTrainParallel(m *TensorModel, tokenizer *Tokenizer, docs []string, opts TrainOptions, progress ProgressFn) error {
+	if m == nil {
+		return errors.New("model must not be nil")
+	}
+	if tokenizer == nil {
+		return errors.New("tokenizer must not be nil")
+	}
+	if len(docs) == 0 {
+		return errors.New("docs must not be empty")
+	}
+	if opts.NumSteps <= 0 {
+		return fmt.Errorf("num steps must be > 0, got %d", opts.NumSteps)
+	}
+
+	cfg := m.Cfg
+
+	// Determine number of workers: largest P <= GOMAXPROCS that divides Batch.
+	P := runtime.GOMAXPROCS(0)
+	if P > cfg.Batch {
+		P = cfg.Batch
+	}
+	for cfg.Batch%P != 0 {
+		P--
+	}
+	K := cfg.Batch / P // items per worker
+
+	// Per-worker resources (allocated once, reused across steps).
+	type workerState struct {
+		cfg   TensorConfig
+		cache *TensorCache
+		grads *TensorGrads
+		loss  float32
+	}
+	workers := make([]workerState, P)
+	for i := range P {
+		wcfg := cfg
+		wcfg.Batch = K
+		workers[i] = workerState{
+			cfg:   wcfg,
+			cache: NewTensorCache(wcfg),
+			grads: NewTensorGrads(wcfg),
+		}
+	}
+
+	// Total gradient accumulator (full-batch sized).
+	totalGrads := NewTensorGrads(cfg)
+
+	paramSlices := m.ParamSlices()
+	totalGradSlices := totalGrads.GradSlices()
+
+	adam := NewTensorAdam(
+		paramSlices,
+		float32(opts.LearningRate),
+		float32(opts.Beta1),
+		float32(opts.Beta2),
+		float32(opts.EpsAdam),
+	)
+
+	rng := rand.New(rand.NewSource(42))
+	invP := float32(1.0) / float32(P)
+
+	var wg sync.WaitGroup
+
+	for step := range opts.NumSteps {
+		// Sample batch and distribute tokens across workers.
+		for w := range P {
+			for b := range K {
+				docIdx := rng.Intn(len(docs))
+				tokens := tokenizer.EncodeWithBOS(docs[docIdx])
+				seqLen := min(len(tokens), cfg.BlockSize)
+				workers[w].cache.SeqLens[b] = seqLen
+				for t := range cfg.BlockSize {
+					if t < seqLen {
+						workers[w].cache.Tokens[b*cfg.BlockSize+t] = tokens[t]
+					} else {
+						workers[w].cache.Tokens[b*cfg.BlockSize+t] = 0
+					}
+				}
+			}
+		}
+
+		// Parallel Forward + Backward.
+		wg.Add(P)
+		for w := range P {
+			go func(w int) {
+				defer wg.Done()
+				workers[w].loss = Forward(m, workers[w].cache)
+				workers[w].grads.Zero()
+				Backward(m, workers[w].cache, workers[w].grads)
+			}(w)
+		}
+		wg.Wait()
+
+		// Accumulate loss and gradients from all workers.
+		totalGrads.Zero()
+		var totalLoss float32
+		for w := range P {
+			totalLoss += workers[w].loss
+			wGradSlices := workers[w].grads.GradSlices()
+			for i, gs := range wGradSlices {
+				VecAddF32(totalGradSlices[i], gs, len(gs))
+			}
+		}
+		totalLoss *= invP
+		// Scale gradients by 1/P to average across workers.
+		for _, gs := range totalGradSlices {
+			VecScaleF32(gs, invP, len(gs))
+		}
+
+		// Adam step (1-indexed).
+		adam.Step(paramSlices, totalGradSlices, step+1, opts.NumSteps)
+
+		// Sync transposed weights for next backward pass.
+		syncTransposedWeights(m)
+
+		// Report progress.
+		if progress != nil {
+			progress(StepMetrics{
+				Step:  step + 1,
+				Total: opts.NumSteps,
+				Loss:  float64(totalLoss),
 			})
 		}
 	}
