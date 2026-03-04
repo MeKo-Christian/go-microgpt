@@ -42,11 +42,13 @@ const els = {
 };
 
 const state = {
-  kernel: null,
+  worker: null,
   wasmReady: false,
   datasetReady: false,
   modelReady: false,
   training: false,
+  nextRequestID: 1,
+  pending: new Map(),
 };
 
 function log(line) {
@@ -129,8 +131,10 @@ function renderSeriesPath(pathEl, series) {
     pathEl.setAttribute("d", "");
     return;
   }
+
   if (series.length === 1) {
-    pathEl.setAttribute("d", `M 0 ${30 - Number(series[0]) * 30} L 100 ${30 - Number(series[0]) * 30}`);
+    const y = 30 - Number(series[0]) * 30;
+    pathEl.setAttribute("d", `M 0 ${y} L 100 ${y}`);
     return;
   }
 
@@ -143,38 +147,63 @@ function renderSeriesPath(pathEl, series) {
   pathEl.setAttribute("d", `M ${points.join(" L ")}`);
 }
 
-async function bootWasm() {
-  setStateText("booting wasm");
-  log("booting wasm runtime");
-  const go = new Go();
+function handleWorkerMessage(event) {
+  const msg = event.data || {};
 
-  let instance;
-  try {
-    const result = await WebAssembly.instantiateStreaming(fetch("./microgpt.wasm"), go.importObject);
-    instance = result.instance;
-  } catch (_) {
-    const response = await fetch("./microgpt.wasm");
-    const bytes = await response.arrayBuffer();
-    const result = await WebAssembly.instantiate(bytes, go.importObject);
-    instance = result.instance;
+  if (msg.type === "ready") {
+    state.wasmReady = true;
+    setStateText(`ready (${msg.version || "unknown"})`);
+    setDatasetStatus("select a preset or upload a file");
+    setButtons();
+    log(`kernel ready (${msg.version || "unknown"}) in worker`);
+    return;
   }
 
-  go.run(instance);
-
-  state.kernel = globalThis.MicroGPTKernel;
-  if (!state.kernel) {
-    throw new Error("MicroGPTKernel not found after wasm startup");
+  if (msg.type === "fatal") {
+    setStateText("worker error");
+    log(`worker fatal: ${msg.error}`);
+    return;
   }
 
-  state.wasmReady = true;
-  setStateText(`ready (${state.kernel.version || "unknown"})`);
-  log(`kernel ready (${state.kernel.version || "unknown"})`);
-  setButtons();
+  if (msg.type === "progress") {
+    const pending = state.pending.get(msg.id);
+    if (pending && typeof pending.onProgress === "function") {
+      pending.onProgress(msg.progress || {});
+    }
+    return;
+  }
+
+  if (msg.type !== "response") return;
+  const pending = state.pending.get(msg.id);
+  if (!pending) return;
+  state.pending.delete(msg.id);
+
+  if (msg.ok) pending.resolve(msg.result);
+  else pending.reject(new Error(msg.error || "worker request failed"));
+}
+
+function initWorker() {
+  state.worker = new Worker("./worker.js");
+  state.worker.addEventListener("message", handleWorkerMessage);
+  state.worker.addEventListener("error", (event) => {
+    setStateText("worker error");
+    log(`worker error: ${event.message}`);
+  });
+}
+
+function callWorker(method, data = {}, onProgress = null) {
+  if (!state.worker) return Promise.reject(new Error("worker not initialized"));
+  const id = state.nextRequestID++;
+
+  return new Promise((resolve, reject) => {
+    state.pending.set(id, { resolve, reject, onProgress });
+    state.worker.postMessage({ id, method, data });
+  });
 }
 
 async function loadDatasetFromText(text) {
   const seed = parseIntSafe(els.seed.value, 42);
-  const result = state.kernel.loadDataset(text, seed);
+  const result = await callWorker("loadDataset", { text, seed });
   if (!result?.ok) {
     throw new Error(result?.error || "loadDataset failed");
   }
@@ -229,7 +258,7 @@ async function initModel() {
     return;
   }
   setStateText("initializing model");
-  const result = state.kernel.initModel(modelConfigFromUI());
+  const result = await callWorker("initModel", { config: modelConfigFromUI() });
   if (!result?.ok) {
     throw new Error(result?.error || "initModel failed");
   }
@@ -272,7 +301,7 @@ async function train() {
   };
 
   try {
-    const result = await state.kernel.train(opts, progress);
+    const result = await callWorker("train", { options: opts }, progress);
     if (result.stopped) {
       setStateText("stopped");
       log(`training stopped at step ${result.stepsDone}`);
@@ -295,7 +324,7 @@ async function generate() {
   const temp = parseFloatSafe(els.temperature.value, 0.5);
   const count = parseIntSafe(els.sampleCount.value, 12);
   const prompt = els.promptInput.value || "";
-  const out = await state.kernel.generate({ count, temperature: temp, prompt });
+  const out = await callWorker("generate", { options: { count, temperature: temp, prompt } });
   renderSamples(out.samples || []);
   setStateText("trained");
   if (prompt.trim() !== "") {
@@ -306,7 +335,9 @@ async function generate() {
 }
 
 function stop() {
-  state.kernel.stop();
+  callWorker("stop").catch((err) => {
+    log(`stop failed: ${err.message}`);
+  });
   log("stop requested");
 }
 
@@ -357,17 +388,13 @@ function wireUI() {
   });
 }
 
-async function main() {
+function main() {
   setButtons();
   wireUI();
-  try {
-    await bootWasm();
-    setDatasetStatus("select a preset or upload a file");
-  } catch (err) {
-    log(`wasm boot failed: ${err.message}`);
-    setStateText("boot error");
-    setDatasetStatus("wasm boot failed");
-  }
+  initWorker();
+  setStateText("booting worker");
+  setDatasetStatus("starting worker...");
+  log("starting wasm worker");
 }
 
 main();

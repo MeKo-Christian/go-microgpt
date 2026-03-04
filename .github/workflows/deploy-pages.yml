@@ -36,7 +36,7 @@ jobs:
 
       - name: Copy static web assets
         run: |
-          cp web/index.html web/main.js web/dist/
+          cp web/index.html web/main.js web/worker.js web/dist/
           cp -R web/datasets web/dist/
 
       - name: Configure Pages
