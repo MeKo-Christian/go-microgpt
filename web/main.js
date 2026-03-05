@@ -18,6 +18,8 @@ const els = {
   tokenizerCharsetSize: document.getElementById("tokenizerCharsetSize"),
   tokenizerPreviewTokens: document.getElementById("tokenizerPreviewTokens"),
   tokenizerChars: document.getElementById("tokenizerChars"),
+  engineMode: document.getElementById("engineMode"),
+  nLayerGroup: document.getElementById("nLayerGroup"),
   nLayer: document.getElementById("nLayer"),
   nEmbd: document.getElementById("nEmbd"),
   nHead: document.getElementById("nHead"),
@@ -222,12 +224,20 @@ function renderTokenizerPreview() {
 }
 
 function modelConfigFromUI() {
+  const mode = els.engineMode.value;
   return {
+    mode,
     nLayer: parseIntSafe(els.nLayer.value, 1),
     nEmbd: parseIntSafe(els.nEmbd.value, 16),
     nHead: parseIntSafe(els.nHead.value, 4),
     blockSize: parseIntSafe(els.blockSize.value, 16),
   };
+}
+
+function updateEngineUI() {
+  const isTensor = els.engineMode.value === "tensor";
+  // Tensor mode is single-layer; hide the N Layer slider
+  els.nLayerGroup.style.display = isTensor ? "none" : "";
 }
 
 function trainOptionsFromUI() {
@@ -406,8 +416,9 @@ async function initModel() {
   }
   state.modelReady = true;
   els.paramCount.textContent = String(result.numParams);
-  setStateText("model ready");
-  log(`model initialized (${result.numParams} params)`);
+  const mode = result.mode || els.engineMode.value;
+  setStateText(`model ready (${mode})`);
+  log(`model initialized (${result.numParams} params, ${mode} engine)`);
   setButtons();
 }
 
@@ -526,6 +537,13 @@ function wireUI() {
 
   els.tokenizerPreviewInput.addEventListener("input", renderTokenizerPreview);
 
+  els.engineMode.addEventListener("change", () => {
+    updateEngineUI();
+    state.modelReady = false;
+    setButtons();
+    log(`engine switched to ${els.engineMode.value}`);
+  });
+
   els.initBtn.addEventListener("click", () => {
     initModel().catch((err) => {
       log(`init failed: ${err.message}`);
@@ -554,6 +572,7 @@ function wireUI() {
 function main() {
   setButtons();
   renderTokenizerPreview();
+  updateEngineUI();
   wireSliders();
   wireUI();
   initWorker();

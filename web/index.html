@@ -107,8 +107,15 @@
 
         <section class="card span-4">
           <h3>Architecture</h3>
+          <div class="row" style="margin-bottom: 8px">
+            <label for="engineMode" style="flex: 0 0 auto">Engine</label>
+            <select id="engineMode" style="flex: 1">
+              <option value="tensor" selected>Optimized (tensor)</option>
+              <option value="classic">Classic (autograd)</option>
+            </select>
+          </div>
           <div class="slider-grid slider-stack">
-            <div class="slider-label">
+            <div class="slider-label" id="nLayerGroup">
               <div class="slider-header"><label for="nLayer">N Layer</label><span class="slider-val" id="nLayerVal">1</span></div>
               <input id="nLayer" type="range" min="1" max="6" step="1" value="1" />
             </div>

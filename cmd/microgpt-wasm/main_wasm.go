@@ -16,6 +16,12 @@ import (
 	microgpt "go-microgpt"
 )
 
+// mode selects between classic autograd and optimized tensor training.
+const (
+	modeClassic = "classic"
+	modeTensor  = "tensor"
+)
+
 type appState struct {
 	mu sync.Mutex
 
@@ -23,13 +29,17 @@ type appState struct {
 	rng       *rand.Rand
 	docs      []string
 	tokenizer *microgpt.Tokenizer
-	model     *microgpt.TensorModel
 
-	// UI-facing config (mapped to TensorConfig on init).
+	// One of these is non-nil depending on mode.
+	classicModel *microgpt.Model
+	tensorModel  *microgpt.TensorModel
+
+	mode      string // "classic" or "tensor"
+	modelCfg  microgpt.ModelConfig
+	batch     int
 	nEmbd     int
 	nHead     int
 	blockSize int
-	batch     int
 
 	training      atomic.Bool
 	stopRequested atomic.Bool
@@ -37,10 +47,17 @@ type appState struct {
 
 var state = &appState{
 	seed:      42,
+	mode:      modeTensor,
 	nEmbd:     16,
 	nHead:     4,
 	blockSize: 16,
 	batch:     8,
+	modelCfg: microgpt.ModelConfig{
+		NLayer:    1,
+		NEmbd:     16,
+		BlockSize: 16,
+		NHead:     4,
+	},
 }
 
 type trainOptions struct {
@@ -70,7 +87,7 @@ func defaultTrainOptions() trainOptions {
 
 func main() {
 	kernel := map[string]any{
-		"version":     "0.3.0-wasm-tensor",
+		"version":     "0.3.0-wasm-dual",
 		"loadDataset": js.FuncOf(loadDataset),
 		"initModel":   js.FuncOf(initModel),
 		"train":       js.FuncOf(trainAsync),
@@ -79,7 +96,7 @@ func main() {
 	}
 
 	js.Global().Set("MicroGPTKernel", js.ValueOf(kernel))
-	println("MicroGPT wasm kernel loaded (tensor)")
+	println("MicroGPT wasm kernel loaded (dual mode)")
 	select {}
 }
 
@@ -112,7 +129,8 @@ func loadDataset(_ js.Value, args []js.Value) any {
 	state.rng = rng
 	state.docs = docs
 	state.tokenizer = tokenizer
-	state.model = nil
+	state.classicModel = nil
+	state.tensorModel = nil
 	state.mu.Unlock()
 
 	chars := make([]any, len(tokenizer.Chars))
@@ -134,10 +152,13 @@ func initModel(_ js.Value, args []js.Value) any {
 		return errResult("cannot initialize model while training")
 	}
 
+	// Parse config from JS.
 	nEmbd := state.nEmbd
 	nHead := state.nHead
 	blockSize := state.blockSize
+	nLayer := state.modelCfg.NLayer
 	batch := state.batch
+	mode := state.mode
 
 	if len(args) > 0 && args[0].Type() == js.TypeObject {
 		v := args[0]
@@ -150,8 +171,14 @@ func initModel(_ js.Value, args []js.Value) any {
 		if x := pickNumber(v, "blockSize", "block_size"); x > 0 {
 			blockSize = int(x)
 		}
+		if x := pickNumber(v, "nLayer", "n_layer"); x > 0 {
+			nLayer = int(x)
+		}
 		if x := pickNumber(v, "batch", "batchSize"); x > 0 {
 			batch = int(x)
+		}
+		if m := v.Get("mode"); m.Type() == js.TypeString {
+			mode = m.String()
 		}
 	}
 
@@ -176,21 +203,39 @@ func initModel(_ js.Value, args []js.Value) any {
 	state.nHead = nHead
 	state.blockSize = blockSize
 	state.batch = batch
-
-	cfg := microgpt.TensorConfig{
-		DModel:    nEmbd,
-		NHeads:    nHead,
-		DFF:       4 * nEmbd,
-		VocabSize: state.tokenizer.VocabSize(),
+	state.mode = mode
+	state.modelCfg = microgpt.ModelConfig{
+		NLayer:    nLayer,
+		NEmbd:     nEmbd,
 		BlockSize: blockSize,
-		Batch:     batch,
+		NHead:     nHead,
 	}
 
-	state.model = microgpt.NewTensorModel(cfg, state.rng)
+	var numParams int
+
+	if mode == modeClassic {
+		state.classicModel = microgpt.NewModel(state.modelCfg, state.tokenizer.VocabSize(), state.rng)
+		state.tensorModel = nil
+		numParams = len(state.classicModel.Params)
+	} else {
+		cfg := microgpt.TensorConfig{
+			DModel:    nEmbd,
+			NHeads:    nHead,
+			DFF:       4 * nEmbd,
+			VocabSize: state.tokenizer.VocabSize(),
+			BlockSize: blockSize,
+			Batch:     batch,
+		}
+		state.tensorModel = microgpt.NewTensorModel(cfg, state.rng)
+		state.classicModel = nil
+		numParams = len(state.tensorModel.AllParams())
+	}
 
 	return okResult(map[string]any{
-		"numParams": len(state.model.AllParams()),
+		"numParams": numParams,
+		"mode":      mode,
 		"config": map[string]any{
+			"nLayer":    nLayer,
 			"nEmbd":     nEmbd,
 			"nHead":     nHead,
 			"blockSize": blockSize,
@@ -218,7 +263,19 @@ func trainAsync(_ js.Value, args []js.Value) any {
 		}
 
 		go func() {
-			res, err := runTraining(opts, progressCB)
+			var res map[string]any
+			var err error
+
+			state.mu.Lock()
+			mode := state.mode
+			state.mu.Unlock()
+
+			if mode == modeClassic {
+				res, err = runTrainingClassic(opts, progressCB)
+			} else {
+				res, err = runTrainingTensor(opts, progressCB)
+			}
+
 			if err != nil {
 				reject.Invoke(err.Error())
 				return
@@ -272,7 +329,11 @@ func stopTraining(_ js.Value, _ []js.Value) any {
 	return okResult(map[string]any{"stopping": true})
 }
 
-func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error) {
+// ---------------------------------------------------------------------------
+// Classic autograd training
+// ---------------------------------------------------------------------------
+
+func runTrainingClassic(opts trainOptions, progressCB js.Value) (map[string]any, error) {
 	if opts.NumSteps <= 0 {
 		return nil, fmt.Errorf("steps must be > 0, got %d", opts.NumSteps)
 	}
@@ -293,7 +354,145 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 	state.stopRequested.Store(false)
 
 	state.mu.Lock()
-	model := state.model
+	model := state.classicModel
+	tokenizer := state.tokenizer
+	docs := state.docs
+	rng := state.rng
+	cfg := state.modelCfg
+	state.mu.Unlock()
+
+	if model == nil {
+		return nil, errors.New("model not initialized")
+	}
+	if tokenizer == nil || len(docs) == 0 {
+		return nil, errors.New("dataset not loaded")
+	}
+	if rng == nil {
+		return nil, errors.New("rng not initialized")
+	}
+
+	adam := microgpt.NewAdam(len(model.Params), opts.LearningRate, opts.Beta1, opts.Beta2, opts.EpsAdam)
+	start := time.Now()
+	lossHistory := make([]float64, 0, opts.NumSteps)
+	stepTimeHistory := make([]float64, 0, opts.NumSteps)
+
+	for step := range opts.NumSteps {
+		if state.stopRequested.Load() {
+			return map[string]any{
+				"stopped":     true,
+				"stepsDone":   step,
+				"totalSteps":  opts.NumSteps,
+				"totalTimeMs": time.Since(start).Milliseconds(),
+			}, nil
+		}
+
+		stepStart := time.Now()
+
+		doc := docs[step%len(docs)]
+		tokens := tokenizer.EncodeWithBOS(doc)
+		n := min(cfg.BlockSize, len(tokens)-1)
+
+		cache := microgpt.NewKVCache(cfg.NLayer)
+		losses := make(microgpt.Vec, 0, n)
+		for posID := range n {
+			tokenID := tokens[posID]
+			targetID := tokens[posID+1]
+			logits := model.ForwardToken(tokenID, posID, cache)
+			probs := microgpt.Softmax(logits)
+			losses = append(losses, probs[targetID].Log().Neg())
+		}
+
+		loss := microgpt.NewValue(0)
+		for _, lt := range losses {
+			loss = loss.Add(lt)
+		}
+		loss = loss.MulScalar(1.0 / float64(n))
+
+		loss.Backward()
+		adam.Step(model.Params, step, opts.NumSteps)
+
+		sample := ""
+		if step%opts.SampleEvery == 0 || step == opts.NumSteps-1 {
+			out, err := microgpt.GenerateSamples(model, tokenizer, microgpt.SampleOptions{
+				NumSamples:  1,
+				Temperature: opts.LiveSampleTemp,
+			}, rng)
+			if err == nil && len(out) > 0 {
+				sample = out[0]
+			}
+		}
+
+		stepTimeMs := float64(time.Since(stepStart).Milliseconds())
+		lossHistory = append(lossHistory, loss.Data)
+		stepTimeHistory = append(stepTimeHistory, stepTimeMs)
+
+		if progressCB.Type() == js.TypeFunction {
+			payload := map[string]any{
+				"step":       step + 1,
+				"totalSteps": opts.NumSteps,
+				"loss":       loss.Data,
+				"stepTimeMs": int64(stepTimeMs),
+				"elapsedMs":  time.Since(start).Milliseconds(),
+				"sample":     sample,
+			}
+
+			if step%5 == 0 || step == opts.NumSteps-1 {
+				payload["lossSeries"] = floatSliceToAny(sparklineSeries(lossHistory, 140, true))
+				payload["stepTimeSeries"] = floatSliceToAny(sparklineSeries(stepTimeHistory, 140, false))
+			}
+
+			safeInvoke(progressCB, payload)
+		}
+
+		if step%5 == 0 {
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	samples, err := microgpt.GenerateSamples(model, tokenizer, microgpt.SampleOptions{
+		NumSamples:  opts.FinalSamples,
+		Temperature: opts.LiveSampleTemp,
+	}, rng)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"stopped":        false,
+		"samples":        stringSliceToAny(samples),
+		"lossSeries":     floatSliceToAny(sparklineSeries(lossHistory, 140, true)),
+		"stepTimeSeries": floatSliceToAny(sparklineSeries(stepTimeHistory, 140, false)),
+		"totalSteps":     opts.NumSteps,
+		"totalTimeMs":    time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Tensor-optimised training
+// ---------------------------------------------------------------------------
+
+func runTrainingTensor(opts trainOptions, progressCB js.Value) (map[string]any, error) {
+	if opts.NumSteps <= 0 {
+		return nil, fmt.Errorf("steps must be > 0, got %d", opts.NumSteps)
+	}
+	if opts.SampleEvery <= 0 {
+		opts.SampleEvery = 50
+	}
+	if opts.LiveSampleTemp <= 0 {
+		opts.LiveSampleTemp = 0.5
+	}
+	if opts.FinalSamples <= 0 {
+		opts.FinalSamples = 10
+	}
+
+	if state.training.Swap(true) {
+		return nil, errors.New("training already in progress")
+	}
+	defer state.training.Store(false)
+	state.stopRequested.Store(false)
+
+	state.mu.Lock()
+	model := state.tensorModel
 	tokenizer := state.tokenizer
 	docs := state.docs
 	rng := state.rng
@@ -310,7 +509,7 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 	}
 
 	cfg := model.Cfg
-	cache := microgpt.NewTensorCache(cfg)
+	tc := microgpt.NewTensorCache(cfg)
 	grads := microgpt.NewTensorGrads(cfg)
 	paramSlices := model.ParamSlices()
 	gradSlices := grads.GradSlices()
@@ -343,20 +542,20 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 			docIdx := rng.Intn(len(docs))
 			tokens := tokenizer.EncodeWithBOS(docs[docIdx])
 			seqLen := min(len(tokens), cfg.BlockSize)
-			cache.SeqLens[b] = seqLen
+			tc.SeqLens[b] = seqLen
 			for t := range cfg.BlockSize {
 				if t < seqLen {
-					cache.Tokens[b*cfg.BlockSize+t] = tokens[t]
+					tc.Tokens[b*cfg.BlockSize+t] = tokens[t]
 				} else {
-					cache.Tokens[b*cfg.BlockSize+t] = 0
+					tc.Tokens[b*cfg.BlockSize+t] = 0
 				}
 			}
 		}
 
-		// Forward → Backward → Adam.
-		loss := microgpt.Forward(model, cache)
+		// Forward -> Backward -> Adam.
+		loss := microgpt.Forward(model, tc)
 		grads.Zero()
-		microgpt.Backward(model, cache, grads)
+		microgpt.Backward(model, tc, grads)
 		adam.Step(paramSlices, gradSlices, step+1, opts.NumSteps)
 		microgpt.SyncTransposedWeights(model)
 
@@ -409,6 +608,10 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 	}, nil
 }
 
+// ---------------------------------------------------------------------------
+// Generation (dispatches by mode)
+// ---------------------------------------------------------------------------
+
 func runGenerate(prompt string, count int, temp float64) (map[string]any, error) {
 	if count <= 0 {
 		return nil, fmt.Errorf("count must be > 0, got %d", count)
@@ -421,18 +624,33 @@ func runGenerate(prompt string, count int, temp float64) (map[string]any, error)
 	}
 
 	state.mu.Lock()
-	model := state.model
+	mode := state.mode
+	classicModel := state.classicModel
+	tensorModel := state.tensorModel
 	tokenizer := state.tokenizer
 	rng := state.rng
 	state.mu.Unlock()
 
-	if model == nil || tokenizer == nil || rng == nil {
+	if tokenizer == nil || rng == nil {
 		return nil, errors.New("model is not ready")
 	}
 
 	out := make([]string, 0, count)
-	for range count {
-		out = append(out, microgpt.GenerateFastWithPrompt(model, tokenizer, prompt, temp, rng))
+
+	if mode == modeClassic {
+		if classicModel == nil {
+			return nil, errors.New("model is not ready")
+		}
+		for range count {
+			out = append(out, generateWithPromptClassic(classicModel, tokenizer, prompt, temp, rng))
+		}
+	} else {
+		if tensorModel == nil {
+			return nil, errors.New("model is not ready")
+		}
+		for range count {
+			out = append(out, microgpt.GenerateFastWithPrompt(tensorModel, tokenizer, prompt, temp, rng))
+		}
 	}
 
 	return map[string]any{
@@ -441,8 +659,66 @@ func runGenerate(prompt string, count int, temp float64) (map[string]any, error)
 	}, nil
 }
 
+// generateWithPromptClassic uses the original autograd model for generation.
+func generateWithPromptClassic(model *microgpt.Model, tokenizer *microgpt.Tokenizer, prompt string, temperature float64, rng *rand.Rand) string {
+	cfg := model.Config()
+	if temperature <= 0 {
+		temperature = 0.5
+	}
+
+	lookup := make(map[rune]int, len(tokenizer.Chars))
+	for i, ch := range tokenizer.Chars {
+		lookup[ch] = i
+	}
+
+	keys := microgpt.NewKVCache(cfg.NLayer)
+	tokenID := tokenizer.BOS
+	posID := 0
+	logits := model.ForwardToken(tokenID, posID, keys)
+	posID++
+
+	promptRunes := []rune(prompt)
+	for _, ch := range promptRunes {
+		id, ok := lookup[ch]
+		if !ok || posID >= cfg.BlockSize {
+			continue
+		}
+		tokenID = id
+		logits = model.ForwardToken(tokenID, posID, keys)
+		posID++
+	}
+
+	outRunes := make([]rune, 0, cfg.BlockSize)
+	outRunes = append(outRunes, promptRunes...)
+	for posID < cfg.BlockSize {
+		tokenID = sampleTokenClassic(logits, temperature, rng)
+		if tokenID == tokenizer.BOS {
+			break
+		}
+		outRunes = append(outRunes, tokenizer.Chars[tokenID])
+		logits = model.ForwardToken(tokenID, posID, keys)
+		posID++
+	}
+
+	return string(outRunes)
+}
+
+func sampleTokenClassic(logits microgpt.Vec, temperature float64, rng *rand.Rand) int {
+	scaled := make(microgpt.Vec, len(logits))
+	invTemp := 1.0 / temperature
+	for i, l := range logits {
+		scaled[i] = l.MulScalar(invTemp)
+	}
+	probs := microgpt.Softmax(scaled)
+	weights := make([]float64, len(probs))
+	for i, p := range probs {
+		weights[i] = p.Data
+	}
+	return microgpt.SampleWeighted(rng, weights)
+}
+
 // ---------------------------------------------------------------------------
-// Helpers (unchanged)
+// Helpers
 // ---------------------------------------------------------------------------
 
 func parseDocs(text string) []string {
