@@ -25,6 +25,7 @@ const els = {
   nHead: document.getElementById("nHead"),
   blockSize: document.getElementById("blockSize"),
   steps: document.getElementById("steps"),
+  unlimitedSteps: document.getElementById("unlimitedSteps"),
   seed: document.getElementById("seed"),
   learningRate: document.getElementById("learningRate"),
   temperature: document.getElementById("temperature"),
@@ -249,8 +250,9 @@ function updateEngineUI() {
 }
 
 function trainOptionsFromUI() {
+  const unlimited = els.unlimitedSteps.checked;
   return {
-    steps: parseIntSafe(els.steps.value, 1000),
+    steps: unlimited ? 1000000 : parseIntSafe(els.steps.value, 1000),
     learningRate: parseFloatSafe(els.learningRate.value, 0.01),
     temperature: parseFloatSafe(els.temperature.value, 0.5),
     sampleEvery: 25,
@@ -376,7 +378,9 @@ async function loadDatasetFromText(text) {
   const suggested = Math.min(3000, Math.max(500, result.numDocs * 3));
   const rounded = Math.round(suggested / 50) * 50;
   els.steps.value = String(rounded);
-  document.getElementById("stepsVal").textContent = String(rounded);
+  if (!els.unlimitedSteps.checked) {
+    document.getElementById("stepsVal").textContent = String(rounded);
+  }
 
   setDatasetStatus(`loaded ${result.numDocs} docs / vocab ${result.vocabSize}`);
   setStateText("dataset ready");
@@ -447,10 +451,16 @@ async function train() {
   log("training started");
 
   const opts = trainOptionsFromUI();
+  const unlimited = els.unlimitedSteps.checked;
   const progress = (m) => {
-    const pct = (m.step / m.totalSteps) * 100;
-    els.progressFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
-    els.stepValue.textContent = `${m.step} / ${m.totalSteps}`;
+    if (unlimited) {
+      els.progressFill.style.width = "100%";
+      els.stepValue.textContent = `${m.step} / \u221E`;
+    } else {
+      const pct = (m.step / m.totalSteps) * 100;
+      els.progressFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+      els.stepValue.textContent = `${m.step} / ${m.totalSteps}`;
+    }
     els.lossValue.textContent = Number(m.loss).toFixed(4);
     els.stepTimeValue.textContent = formatMs(Number(m.stepTimeMs || 0));
     els.elapsedValue.textContent = formatMs(Number(m.elapsedMs || 0));
@@ -556,6 +566,12 @@ function wireUI() {
   });
 
   els.tokenizerPreviewInput.addEventListener("input", renderTokenizerPreview);
+
+  els.unlimitedSteps.addEventListener("change", () => {
+    const unlimited = els.unlimitedSteps.checked;
+    els.steps.disabled = unlimited;
+    document.getElementById("stepsVal").textContent = unlimited ? "\u221E" : els.steps.value;
+  });
 
   els.engineMode.addEventListener("change", () => {
     updateEngineUI();

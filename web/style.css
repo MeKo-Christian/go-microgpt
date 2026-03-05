@@ -399,6 +399,22 @@ ul.samples li {
   color: #9ec5de;
 }
 
+.unlimited-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: #9ec5de;
+  cursor: pointer;
+  user-select: none;
+}
+
+.unlimited-label input[type="checkbox"] {
+  accent-color: #62deff;
+  cursor: pointer;
+}
+
 a {
   color: #90ddf5;
 }
