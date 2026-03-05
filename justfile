@@ -54,7 +54,7 @@ web-build:
     mkdir -p {{go_cache}}
     cache_root="$(pwd)/{{cache_dir}}"; GOCACHE="${GOCACHE:-$cache_root/go-build}" GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o web/dist/microgpt.wasm ./cmd/microgpt-wasm
     cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" web/dist/wasm_exec.js
-    cp web/index.html web/main.js web/worker.js web/dist/
+    cp web/index.html web/style.css web/main.js web/worker.js web/dist/
     rm -rf web/dist/datasets
     cp -R web/datasets web/dist/datasets
 

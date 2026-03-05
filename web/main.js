@@ -13,6 +13,11 @@ const els = {
   docsCount: document.getElementById("docsCount"),
   vocabSize: document.getElementById("vocabSize"),
   datasetStatus: document.getElementById("datasetStatus"),
+  tokenizerPreviewInput: document.getElementById("tokenizerPreviewInput"),
+  tokenizerBos: document.getElementById("tokenizerBos"),
+  tokenizerCharsetSize: document.getElementById("tokenizerCharsetSize"),
+  tokenizerPreviewTokens: document.getElementById("tokenizerPreviewTokens"),
+  tokenizerChars: document.getElementById("tokenizerChars"),
   nLayer: document.getElementById("nLayer"),
   nEmbd: document.getElementById("nEmbd"),
   nHead: document.getElementById("nHead"),
@@ -60,6 +65,8 @@ const state = {
   datasetReady: false,
   modelReady: false,
   training: false,
+  tokenizerChars: [],
+  tokenizerBOS: -1,
   nextRequestID: 1,
   pending: new Map(),
 };
@@ -176,6 +183,42 @@ function parseIntSafe(value, fallback) {
 function parseFloatSafe(value, fallback) {
   const x = Number.parseFloat(value);
   return Number.isFinite(x) ? x : fallback;
+}
+
+function showChar(ch) {
+  if (ch === " ") return "␠";
+  if (ch === "\t") return "⇥";
+  if (ch === "\n") return "↵";
+  return ch;
+}
+
+function renderTokenizerPreview() {
+  if (!Array.isArray(state.tokenizerChars) || state.tokenizerChars.length === 0 || state.tokenizerBOS < 0) {
+    els.tokenizerBos.textContent = "-";
+    els.tokenizerCharsetSize.textContent = "-";
+    els.tokenizerPreviewTokens.textContent = "(load dataset first)";
+    els.tokenizerChars.textContent = "-";
+    return;
+  }
+
+  const stoi = new Map();
+  for (let i = 0; i < state.tokenizerChars.length; i++) {
+    stoi.set(state.tokenizerChars[i], i);
+  }
+
+  const input = els.tokenizerPreviewInput.value || "";
+  const tokens = [`BOS(${state.tokenizerBOS})`];
+  for (const ch of input) {
+    const idx = stoi.get(ch);
+    if (idx === undefined) tokens.push(`${showChar(ch)}(?)`);
+    else tokens.push(`${showChar(ch)}(${idx})`);
+  }
+  tokens.push(`BOS(${state.tokenizerBOS})`);
+
+  els.tokenizerBos.textContent = String(state.tokenizerBOS);
+  els.tokenizerCharsetSize.textContent = String(state.tokenizerChars.length);
+  els.tokenizerPreviewTokens.textContent = tokens.join(" ");
+  els.tokenizerChars.textContent = state.tokenizerChars.map(showChar).join(" ");
 }
 
 function modelConfigFromUI() {
@@ -303,6 +346,13 @@ async function loadDatasetFromText(text) {
   state.modelReady = false;
   els.docsCount.textContent = String(result.numDocs);
   els.vocabSize.textContent = String(result.vocabSize);
+  state.tokenizerChars = Array.isArray(result.chars) ? result.chars.map(String) : [];
+  state.tokenizerBOS = Number.isFinite(Number(result.bos)) ? Number(result.bos) : -1;
+
+  if (els.tokenizerPreviewInput.value.trim() === "" && Array.isArray(result.sampleDocs) && result.sampleDocs.length > 0) {
+    els.tokenizerPreviewInput.value = String(result.sampleDocs[0]);
+  }
+  renderTokenizerPreview();
 
   const suggested = Math.min(3000, Math.max(500, result.numDocs * 3));
   const rounded = Math.round(suggested / 50) * 50;
@@ -474,6 +524,8 @@ function wireUI() {
     event.target.value = "";
   });
 
+  els.tokenizerPreviewInput.addEventListener("input", renderTokenizerPreview);
+
   els.initBtn.addEventListener("click", () => {
     initModel().catch((err) => {
       log(`init failed: ${err.message}`);
@@ -501,6 +553,7 @@ function wireUI() {
 
 function main() {
   setButtons();
+  renderTokenizerPreview();
   wireSliders();
   wireUI();
   initWorker();
