@@ -1,5 +1,8 @@
 let kernel = null;
 let bootPromise = null;
+const assetVersion = Date.now().toString(36);
+const wasmExecURL = `./wasm_exec.js?v=${assetVersion}`;
+const wasmURL = `./microgpt.wasm?v=${assetVersion}`;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -9,16 +12,17 @@ async function bootKernel() {
   if (bootPromise) return bootPromise;
 
   bootPromise = (async () => {
-    importScripts("./wasm_exec.js");
+    importScripts(wasmExecURL);
 
     const go = new Go();
 
     let instance;
     try {
-      const result = await WebAssembly.instantiateStreaming(fetch("./microgpt.wasm"), go.importObject);
+      const response = await fetch(wasmURL, { cache: "no-store" });
+      const result = await WebAssembly.instantiateStreaming(response, go.importObject);
       instance = result.instance;
     } catch (_) {
-      const response = await fetch("./microgpt.wasm");
+      const response = await fetch(wasmURL, { cache: "no-store" });
       const bytes = await response.arrayBuffer();
       const result = await WebAssembly.instantiate(bytes, go.importObject);
       instance = result.instance;
