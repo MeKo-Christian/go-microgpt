@@ -117,6 +117,42 @@ func TestTrainAPIUpdatesParametersAndReportsProgress(t *testing.T) {
 	}
 }
 
+// BenchmarkAutogradTrainStep benchmarks the original autograd forward+backward+adam
+// with the same dimensions as BenchmarkTensorTrainStep for direct comparison.
+func BenchmarkAutogradTrainStep(b *testing.B) {
+	docs := []string{"ab", "cd", "ef"}
+	tok := NewTokenizer(docs)
+	cfg := ModelConfig{
+		NLayer:    1,
+		NEmbd:     16,
+		BlockSize: 16,
+		NHead:     4,
+	}
+	rng := rand.New(rand.NewSource(42))
+	model := NewModel(cfg, tok.VocabSize(), rng)
+	adam := NewAdam(len(model.Params), 0.01, 0.85, 0.99, 1e-8)
+
+	tokens := tok.EncodeWithBOS(docs[0])
+	seqLen := len(tokens) - 1
+	if seqLen > cfg.BlockSize {
+		seqLen = cfg.BlockSize
+	}
+
+	b.ResetTimer()
+	for i := range b.N {
+		cache := NewKVCache(cfg.NLayer)
+		loss := NewValue(0)
+		for pos := range seqLen {
+			logits := model.ForwardToken(tokens[pos], pos, cache)
+			probs := Softmax(logits)
+			loss = loss.Add(probs[tokens[pos+1]].Log().Neg())
+		}
+		loss = loss.MulScalar(1.0 / float64(seqLen))
+		loss.Backward()
+		adam.Step(model.Params, i, b.N)
+	}
+}
+
 func TestGenerateSamplesAPI(t *testing.T) {
 	docs := []string{"anna", "bob"}
 	tok := NewTokenizer(docs)

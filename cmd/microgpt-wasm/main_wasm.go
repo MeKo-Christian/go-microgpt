@@ -123,7 +123,7 @@ func loadDataset(_ js.Value, args []js.Value) any {
 		"vocabSize":  tokenizer.VocabSize(),
 		"bos":        tokenizer.BOS,
 		"chars":      chars,
-		"sampleDocs": docs[:min(5, len(docs))],
+		"sampleDocs": stringSliceToAny(docs[:min(5, len(docs))]),
 	})
 }
 
