@@ -701,104 +701,138 @@ func TensorTrainParallel(m *TensorModel, tokenizer *Tokenizer, docs []string, op
 // Fast generation
 // ---------------------------------------------------------------------------
 
-// GenerateFast generates text samples using the tensor model.
-// Uses single-item batch (Batch=1) with the existing Forward infrastructure.
-// For each new token, re-runs the full forward pass (no KV cache).
-func GenerateFast(m *TensorModel, tokenizer *Tokenizer, opts SampleOptions, rng *rand.Rand) []string {
-	cfg := m.Cfg
-	V := cfg.VocabSize
-	T := cfg.BlockSize
-
-	// Create a temporary config with Batch=1 for generation
+// genModelBatch1 creates a lightweight model wrapper pointing to the same weights
+// but with Batch=1 config for generation.
+func genModelBatch1(m *TensorModel) (*TensorModel, *TensorCache) {
 	genCfg := TensorConfig{
-		DModel:    cfg.DModel,
-		NHeads:    cfg.NHeads,
-		DFF:       cfg.DFF,
-		VocabSize: cfg.VocabSize,
-		BlockSize: cfg.BlockSize,
+		DModel:    m.Cfg.DModel,
+		NHeads:    m.Cfg.NHeads,
+		DFF:       m.Cfg.DFF,
+		VocabSize: m.Cfg.VocabSize,
+		BlockSize: m.Cfg.BlockSize,
 		Batch:     1,
 	}
-	c := NewTensorCache(genCfg)
-
-	// Build a temporary model wrapper pointing to the same weights but with Batch=1 config
 	genModel := &TensorModel{
 		Cfg:    genCfg,
-		TokEmb: m.TokEmb,
-		PosEmb: m.PosEmb,
-		Wq:     m.Wq,
-		Wk:     m.Wk,
-		Wv:     m.Wv,
-		Wo:     m.Wo,
-		Wf1:    m.Wf1,
-		Wf2:    m.Wf2,
-		Wlm:    m.Wlm,
-		WqT:    m.WqT,
-		WkT:    m.WkT,
-		WvT:    m.WvT,
-		WoT:    m.WoT,
-		Wf1T:   m.Wf1T,
-		Wf2T:   m.Wf2T,
+		TokEmb: m.TokEmb, PosEmb: m.PosEmb,
+		Wq: m.Wq, Wk: m.Wk, Wv: m.Wv, Wo: m.Wo,
+		Wf1: m.Wf1, Wf2: m.Wf2, Wlm: m.Wlm,
+		WqT: m.WqT, WkT: m.WkT, WvT: m.WvT, WoT: m.WoT,
+		Wf1T: m.Wf1T, Wf2T: m.Wf2T,
 	}
+	return genModel, NewTensorCache(genCfg)
+}
 
+// sampleFromLogits applies temperature scaling, softmax, and samples a token.
+func sampleFromLogits(logits []float32, V int, invTemp float32, rng *rand.Rand) int {
+	scaled := make([]float32, V)
+	for v := range V {
+		scaled[v] = logits[v] * invTemp
+	}
+	SoftmaxF32(scaled, V)
+
+	weights := make([]float64, V)
+	for v := range V {
+		weights[v] = float64(scaled[v])
+	}
+	return SampleWeighted(rng, weights)
+}
+
+// fillCacheTokens copies tokens into cache slot 0, zero-padding to BlockSize.
+func fillCacheTokens(c *TensorCache, tokens []int, T int) {
+	seqLen := min(len(tokens), T)
+	c.SeqLens[0] = seqLen
+	for t := range T {
+		if t < seqLen {
+			c.Tokens[t] = tokens[t]
+		} else {
+			c.Tokens[t] = 0
+		}
+	}
+}
+
+// GenerateFast generates text samples using the tensor model.
+// Uses single-item batch (Batch=1) with the existing Forward infrastructure.
+func GenerateFast(m *TensorModel, tokenizer *Tokenizer, opts SampleOptions, rng *rand.Rand) []string {
+	V := m.Cfg.VocabSize
+	T := m.Cfg.BlockSize
+	genModel, c := genModelBatch1(m)
 	invTemp := float32(1.0 / opts.Temperature)
 
 	samples := make([]string, 0, opts.NumSamples)
 	for range opts.NumSamples {
-		// Start with BOS token
-		tokens := make([]int, 1, T)
-		tokens[0] = tokenizer.BOS
+		tokens := []int{tokenizer.BOS}
 		sample := make([]rune, 0, T)
 
-		for pos := 0; pos < T-1; pos++ {
-			seqLen := min(len(tokens), T)
-
-			// Fill cache tokens
-			c.SeqLens[0] = seqLen
-			for t := range T {
-				if t < seqLen {
-					c.Tokens[t] = tokens[t]
-				} else {
-					c.Tokens[t] = 0
-				}
-			}
-
-			// Run forward pass
+		for range T - 1 {
+			fillCacheTokens(c, tokens, T)
 			Forward(genModel, c)
 
-			// Get logits from the last position
-			lastPos := seqLen - 1
-			logitsOff := lastPos * V
+			lastPos := min(len(tokens), T) - 1
+			nextTok := sampleFromLogits(c.Logits[lastPos*V:], V, invTemp, rng)
 
-			// Apply temperature scaling and softmax
-			scaledLogits := make([]float32, V)
-			for v := range V {
-				scaledLogits[v] = c.Logits[logitsOff+v] * invTemp
-			}
-			SoftmaxF32(scaledLogits, V)
-
-			// Sample from distribution
-			weights := make([]float64, V)
-			for v := range V {
-				weights[v] = float64(scaledLogits[v])
-			}
-			nextTok := SampleWeighted(rng, weights)
-
-			// Check for end of sequence (BOS used as EOS)
 			if nextTok == tokenizer.BOS {
 				break
 			}
-
 			sample = append(sample, tokenizer.Chars[nextTok])
 			tokens = append(tokens, nextTok)
-
-			// Stop if we hit max length
 			if len(tokens) >= T {
 				break
 			}
 		}
-
 		samples = append(samples, string(sample))
 	}
-
 	return samples
+}
+
+// GenerateFastWithPrompt generates a single text sample with an optional prompt prefix.
+func GenerateFastWithPrompt(m *TensorModel, tokenizer *Tokenizer, prompt string, temperature float64, rng *rand.Rand) string {
+	V := m.Cfg.VocabSize
+	T := m.Cfg.BlockSize
+	genModel, c := genModelBatch1(m)
+
+	if temperature <= 0 {
+		temperature = 0.5
+	}
+	invTemp := float32(1.0 / temperature)
+
+	// Build character-to-id lookup.
+	lookup := make(map[rune]int, len(tokenizer.Chars))
+	for i, ch := range tokenizer.Chars {
+		lookup[ch] = i
+	}
+
+	// Seed tokens with BOS + prompt characters.
+	tokens := []int{tokenizer.BOS}
+	for _, ch := range prompt {
+		id, ok := lookup[ch]
+		if !ok || len(tokens) >= T {
+			continue
+		}
+		tokens = append(tokens, id)
+	}
+
+	outRunes := []rune(prompt)
+
+	// Autoregressive generation.
+	for len(tokens) < T {
+		fillCacheTokens(c, tokens, T)
+		Forward(genModel, c)
+
+		lastPos := min(len(tokens), T) - 1
+		nextTok := sampleFromLogits(c.Logits[lastPos*V:], V, invTemp, rng)
+
+		if nextTok == tokenizer.BOS {
+			break
+		}
+		outRunes = append(outRunes, tokenizer.Chars[nextTok])
+		tokens = append(tokens, nextTok)
+	}
+
+	return string(outRunes)
+}
+
+// SyncTransposedWeights exports syncTransposedWeights for use by external callers (e.g. WASM).
+func SyncTransposedWeights(m *TensorModel) {
+	syncTransposedWeights(m)
 }

@@ -23,22 +23,24 @@ type appState struct {
 	rng       *rand.Rand
 	docs      []string
 	tokenizer *microgpt.Tokenizer
-	model     *microgpt.Model
+	model     *microgpt.TensorModel
 
-	modelCfg microgpt.ModelConfig
+	// UI-facing config (mapped to TensorConfig on init).
+	nEmbd     int
+	nHead     int
+	blockSize int
+	batch     int
 
 	training      atomic.Bool
 	stopRequested atomic.Bool
 }
 
 var state = &appState{
-	seed: 42,
-	modelCfg: microgpt.ModelConfig{
-		NLayer:    1,
-		NEmbd:     16,
-		BlockSize: 16,
-		NHead:     4,
-	},
+	seed:      42,
+	nEmbd:     16,
+	nHead:     4,
+	blockSize: 16,
+	batch:     8,
 }
 
 type trainOptions struct {
@@ -68,7 +70,7 @@ func defaultTrainOptions() trainOptions {
 
 func main() {
 	kernel := map[string]any{
-		"version":     "0.2.0-wasm",
+		"version":     "0.3.0-wasm-tensor",
 		"loadDataset": js.FuncOf(loadDataset),
 		"initModel":   js.FuncOf(initModel),
 		"train":       js.FuncOf(trainAsync),
@@ -77,7 +79,7 @@ func main() {
 	}
 
 	js.Global().Set("MicroGPTKernel", js.ValueOf(kernel))
-	println("MicroGPT wasm kernel loaded")
+	println("MicroGPT wasm kernel loaded (tensor)")
 	select {}
 }
 
@@ -132,15 +134,31 @@ func initModel(_ js.Value, args []js.Value) any {
 		return errResult("cannot initialize model while training")
 	}
 
-	cfg := state.modelCfg
+	nEmbd := state.nEmbd
+	nHead := state.nHead
+	blockSize := state.blockSize
+	batch := state.batch
+
 	if len(args) > 0 && args[0].Type() == js.TypeObject {
-		cfg = parseModelConfig(args[0], cfg)
+		v := args[0]
+		if x := pickNumber(v, "nEmbd", "n_embd"); x > 0 {
+			nEmbd = int(x)
+		}
+		if x := pickNumber(v, "nHead", "n_head"); x > 0 {
+			nHead = int(x)
+		}
+		if x := pickNumber(v, "blockSize", "block_size"); x > 0 {
+			blockSize = int(x)
+		}
+		if x := pickNumber(v, "batch", "batchSize"); x > 0 {
+			batch = int(x)
+		}
 	}
 
-	if cfg.NLayer <= 0 || cfg.NEmbd <= 0 || cfg.BlockSize <= 0 || cfg.NHead <= 0 {
+	if nEmbd <= 0 || blockSize <= 0 || nHead <= 0 {
 		return errResult("all model dimensions must be > 0")
 	}
-	if cfg.NEmbd%cfg.NHead != 0 {
+	if nEmbd%nHead != 0 {
 		return errResult("n_embd must be divisible by n_head")
 	}
 
@@ -154,16 +172,29 @@ func initModel(_ js.Value, args []js.Value) any {
 		state.rng = rand.New(rand.NewSource(state.seed))
 	}
 
-	state.modelCfg = cfg
-	state.model = microgpt.NewModel(cfg, state.tokenizer.VocabSize(), state.rng)
+	state.nEmbd = nEmbd
+	state.nHead = nHead
+	state.blockSize = blockSize
+	state.batch = batch
+
+	cfg := microgpt.TensorConfig{
+		DModel:    nEmbd,
+		NHeads:    nHead,
+		DFF:       4 * nEmbd,
+		VocabSize: state.tokenizer.VocabSize(),
+		BlockSize: blockSize,
+		Batch:     batch,
+	}
+
+	state.model = microgpt.NewTensorModel(cfg, state.rng)
 
 	return okResult(map[string]any{
-		"numParams": len(state.model.Params),
+		"numParams": len(state.model.AllParams()),
 		"config": map[string]any{
-			"nLayer":    cfg.NLayer,
-			"nEmbd":     cfg.NEmbd,
-			"blockSize": cfg.BlockSize,
-			"nHead":     cfg.NHead,
+			"nEmbd":     nEmbd,
+			"nHead":     nHead,
+			"blockSize": blockSize,
+			"batch":     batch,
 		},
 	})
 }
@@ -266,7 +297,6 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 	tokenizer := state.tokenizer
 	docs := state.docs
 	rng := state.rng
-	cfg := state.modelCfg
 	state.mu.Unlock()
 
 	if model == nil {
@@ -279,12 +309,24 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 		return nil, errors.New("rng not initialized")
 	}
 
-	adam := microgpt.NewAdam(len(model.Params), opts.LearningRate, opts.Beta1, opts.Beta2, opts.EpsAdam)
+	cfg := model.Cfg
+	cache := microgpt.NewTensorCache(cfg)
+	grads := microgpt.NewTensorGrads(cfg)
+	paramSlices := model.ParamSlices()
+	gradSlices := grads.GradSlices()
+	adam := microgpt.NewTensorAdam(
+		paramSlices,
+		float32(opts.LearningRate),
+		float32(opts.Beta1),
+		float32(opts.Beta2),
+		float32(opts.EpsAdam),
+	)
+
 	start := time.Now()
 	lossHistory := make([]float64, 0, opts.NumSteps)
 	stepTimeHistory := make([]float64, 0, opts.NumSteps)
 
-	for step := 0; step < opts.NumSteps; step++ {
+	for step := range opts.NumSteps {
 		if state.stopRequested.Load() {
 			return map[string]any{
 				"stopped":     true,
@@ -296,52 +338,43 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 
 		stepStart := time.Now()
 
-		doc := docs[step%len(docs)]
-		tokens := tokenizer.EncodeWithBOS(doc)
-		n := cfg.BlockSize
-		if len(tokens)-1 < n {
-			n = len(tokens) - 1
-		}
-
-		cache := microgpt.NewKVCache(cfg.NLayer)
-		losses := make(microgpt.Vec, 0, n)
-		for posID := 0; posID < n; posID++ {
-			tokenID := tokens[posID]
-			targetID := tokens[posID+1]
-			logits := model.ForwardToken(tokenID, posID, cache)
-			probs := microgpt.Softmax(logits)
-			losses = append(losses, probs[targetID].Log().Neg())
-		}
-
-		loss := microgpt.NewValue(0)
-		for _, lt := range losses {
-			loss = loss.Add(lt)
-		}
-		loss = loss.MulScalar(1.0 / float64(n))
-
-		loss.Backward()
-		adam.Step(model.Params, step, opts.NumSteps)
-
-		sample := ""
-		if step%opts.SampleEvery == 0 || step == opts.NumSteps-1 {
-			out, err := microgpt.GenerateSamples(model, tokenizer, microgpt.SampleOptions{
-				NumSamples:  1,
-				Temperature: opts.LiveSampleTemp,
-			}, rng)
-			if err == nil && len(out) > 0 {
-				sample = out[0]
+		// Fill batch with random documents.
+		for b := range cfg.Batch {
+			docIdx := rng.Intn(len(docs))
+			tokens := tokenizer.EncodeWithBOS(docs[docIdx])
+			seqLen := min(len(tokens), cfg.BlockSize)
+			cache.SeqLens[b] = seqLen
+			for t := range cfg.BlockSize {
+				if t < seqLen {
+					cache.Tokens[b*cfg.BlockSize+t] = tokens[t]
+				} else {
+					cache.Tokens[b*cfg.BlockSize+t] = 0
+				}
 			}
 		}
 
+		// Forward → Backward → Adam.
+		loss := microgpt.Forward(model, cache)
+		grads.Zero()
+		microgpt.Backward(model, cache, grads)
+		adam.Step(paramSlices, gradSlices, step+1, opts.NumSteps)
+		microgpt.SyncTransposedWeights(model)
+
+		// Live sample.
+		sample := ""
+		if step%opts.SampleEvery == 0 || step == opts.NumSteps-1 {
+			sample = microgpt.GenerateFastWithPrompt(model, tokenizer, "", opts.LiveSampleTemp, rng)
+		}
+
 		stepTimeMs := float64(time.Since(stepStart).Milliseconds())
-		lossHistory = append(lossHistory, loss.Data)
+		lossHistory = append(lossHistory, float64(loss))
 		stepTimeHistory = append(stepTimeHistory, stepTimeMs)
 
 		if progressCB.Type() == js.TypeFunction {
 			payload := map[string]any{
 				"step":       step + 1,
 				"totalSteps": opts.NumSteps,
-				"loss":       loss.Data,
+				"loss":       float64(loss),
 				"stepTimeMs": int64(stepTimeMs),
 				"elapsedMs":  time.Since(start).Milliseconds(),
 				"sample":     sample,
@@ -360,13 +393,11 @@ func runTraining(opts trainOptions, progressCB js.Value) (map[string]any, error)
 		}
 	}
 
-	samples, err := microgpt.GenerateSamples(model, tokenizer, microgpt.SampleOptions{
+	// Final samples.
+	samples := microgpt.GenerateFast(model, tokenizer, microgpt.SampleOptions{
 		NumSamples:  opts.FinalSamples,
 		Temperature: opts.LiveSampleTemp,
 	}, rng)
-	if err != nil {
-		return nil, err
-	}
 
 	return map[string]any{
 		"stopped":        false,
@@ -400,9 +431,8 @@ func runGenerate(prompt string, count int, temp float64) (map[string]any, error)
 	}
 
 	out := make([]string, 0, count)
-	for i := 0; i < count; i++ {
-		sample := generateWithPrompt(model, tokenizer, prompt, temp, rng)
-		out = append(out, sample)
+	for range count {
+		out = append(out, microgpt.GenerateFastWithPrompt(model, tokenizer, prompt, temp, rng))
 	}
 
 	return map[string]any{
@@ -410,6 +440,10 @@ func runGenerate(prompt string, count int, temp float64) (map[string]any, error)
 		"samples": stringSliceToAny(out),
 	}, nil
 }
+
+// ---------------------------------------------------------------------------
+// Helpers (unchanged)
+// ---------------------------------------------------------------------------
 
 func parseDocs(text string) []string {
 	lines := strings.Split(text, "\n")
@@ -421,23 +455,6 @@ func parseDocs(text string) []string {
 		}
 	}
 	return out
-}
-
-func parseModelConfig(v js.Value, base microgpt.ModelConfig) microgpt.ModelConfig {
-	cfg := base
-	if x := pickNumber(v, "nLayer", "n_layer"); x > 0 {
-		cfg.NLayer = int(x)
-	}
-	if x := pickNumber(v, "nEmbd", "n_embd"); x > 0 {
-		cfg.NEmbd = int(x)
-	}
-	if x := pickNumber(v, "blockSize", "block_size"); x > 0 {
-		cfg.BlockSize = int(x)
-	}
-	if x := pickNumber(v, "nHead", "n_head"); x > 0 {
-		cfg.NHead = int(x)
-	}
-	return cfg
 }
 
 func parseTrainOptions(v js.Value, base trainOptions) trainOptions {
@@ -527,10 +544,7 @@ func sparklineSeries(values []float64, maxPoints int, useEMA bool) []float64 {
 		return []float64{}
 	}
 
-	step := int(math.Ceil(float64(len(values)) / float64(maxPoints)))
-	if step < 1 {
-		step = 1
-	}
+	step := max(int(math.Ceil(float64(len(values))/float64(maxPoints))), 1)
 
 	reduced := make([]float64, 0, maxPoints)
 	for i := 0; i < len(values); i += step {
@@ -574,68 +588,4 @@ func sparklineSeries(values []float64, maxPoints int, useEMA bool) []float64 {
 		out[i] = (v - minV) / span
 	}
 	return out
-}
-
-func generateWithPrompt(model *microgpt.Model, tokenizer *microgpt.Tokenizer, prompt string, temperature float64, rng *rand.Rand) string {
-	cfg := model.Config()
-	if temperature <= 0 {
-		temperature = 0.5
-	}
-
-	lookup := make(map[rune]int, len(tokenizer.Chars))
-	for i, ch := range tokenizer.Chars {
-		lookup[ch] = i
-	}
-
-	keys := microgpt.NewKVCache(cfg.NLayer)
-	tokenID := tokenizer.BOS
-	posID := 0
-	logits := model.ForwardToken(tokenID, posID, keys)
-	posID++
-
-	promptRunes := []rune(prompt)
-	for _, ch := range promptRunes {
-		id, ok := lookup[ch]
-		if !ok || posID >= cfg.BlockSize {
-			continue
-		}
-		tokenID = id
-		logits = model.ForwardToken(tokenID, posID, keys)
-		posID++
-	}
-
-	outRunes := make([]rune, 0, cfg.BlockSize)
-	outRunes = append(outRunes, promptRunes...)
-	for posID < cfg.BlockSize {
-		tokenID = sampleToken(logits, temperature, rng)
-		if tokenID == tokenizer.BOS {
-			break
-		}
-		outRunes = append(outRunes, tokenizer.Chars[tokenID])
-		logits = model.ForwardToken(tokenID, posID, keys)
-		posID++
-	}
-
-	return string(outRunes)
-}
-
-func sampleToken(logits microgpt.Vec, temperature float64, rng *rand.Rand) int {
-	scaled := make(microgpt.Vec, len(logits))
-	invTemp := 1.0 / temperature
-	for i, l := range logits {
-		scaled[i] = l.MulScalar(invTemp)
-	}
-	probs := microgpt.Softmax(scaled)
-	weights := make([]float64, len(probs))
-	for i, p := range probs {
-		weights[i] = p.Data
-	}
-	return microgpt.SampleWeighted(rng, weights)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

@@ -134,6 +134,10 @@ textarea {
   gap: 9px;
 }
 
+.slider-stack {
+  grid-template-columns: 1fr;
+}
+
 .slider-header {
   display: flex;
   justify-content: space-between;
