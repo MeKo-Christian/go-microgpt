@@ -25,12 +25,14 @@ const els = {
   nHead: document.getElementById("nHead"),
   blockSize: document.getElementById("blockSize"),
   steps: document.getElementById("steps"),
+  unlimitedSteps: document.getElementById("unlimitedSteps"),
   seed: document.getElementById("seed"),
   learningRate: document.getElementById("learningRate"),
   temperature: document.getElementById("temperature"),
   initBtn: document.getElementById("initBtn"),
   trainBtn: document.getElementById("trainBtn"),
   stopBtn: document.getElementById("stopBtn"),
+  resetBtn: document.getElementById("resetBtn"),
   generateBtn: document.getElementById("generateBtn"),
   promptInput: document.getElementById("promptInput"),
   sampleCount: document.getElementById("sampleCount"),
@@ -67,6 +69,7 @@ const state = {
   datasetReady: false,
   modelReady: false,
   training: false,
+  trained: false,
   tokenizerChars: [],
   tokenizerBOS: -1,
   nextRequestID: 1,
@@ -91,7 +94,13 @@ function setButtons() {
   els.initBtn.disabled = !state.wasmReady || !state.datasetReady || state.training;
   els.trainBtn.disabled = !state.wasmReady || !state.datasetReady || !state.modelReady || state.training;
   els.stopBtn.disabled = !state.training;
+  els.resetBtn.disabled = !state.trained || state.training;
   els.generateBtn.disabled = !state.modelReady || state.training;
+
+  // Dynamic button labels
+  els.initBtn.textContent = state.modelReady ? "Reinitialize Model" : "Initialize Model";
+  els.trainBtn.textContent = state.trained ? "Continue Training" : "Train";
+
   updatePipelineDiagram();
 }
 
@@ -241,8 +250,9 @@ function updateEngineUI() {
 }
 
 function trainOptionsFromUI() {
+  const unlimited = els.unlimitedSteps.checked;
   return {
-    steps: parseIntSafe(els.steps.value, 1000),
+    steps: unlimited ? 1000000 : parseIntSafe(els.steps.value, 1000),
     learningRate: parseFloatSafe(els.learningRate.value, 0.01),
     temperature: parseFloatSafe(els.temperature.value, 0.5),
     sampleEvery: 25,
@@ -354,6 +364,7 @@ async function loadDatasetFromText(text) {
 
   state.datasetReady = true;
   state.modelReady = false;
+  state.trained = false;
   els.docsCount.textContent = String(result.numDocs);
   els.vocabSize.textContent = String(result.vocabSize);
   state.tokenizerChars = Array.isArray(result.chars) ? result.chars.map(String) : [];
@@ -367,7 +378,9 @@ async function loadDatasetFromText(text) {
   const suggested = Math.min(3000, Math.max(500, result.numDocs * 3));
   const rounded = Math.round(suggested / 50) * 50;
   els.steps.value = String(rounded);
-  document.getElementById("stepsVal").textContent = String(rounded);
+  if (!els.unlimitedSteps.checked) {
+    document.getElementById("stepsVal").textContent = String(rounded);
+  }
 
   setDatasetStatus(`loaded ${result.numDocs} docs / vocab ${result.vocabSize}`);
   setStateText("dataset ready");
@@ -415,10 +428,13 @@ async function initModel() {
     throw new Error(result?.error || "initModel failed");
   }
   state.modelReady = true;
+  state.trained = false;
   els.paramCount.textContent = String(result.numParams);
   const mode = result.mode || els.engineMode.value;
   setStateText(`model ready (${mode})`);
   log(`model initialized (${result.numParams} params, ${mode} engine)`);
+  resetTrainingStats();
+  renderSamples([]);
   setButtons();
 }
 
@@ -435,10 +451,16 @@ async function train() {
   log("training started");
 
   const opts = trainOptionsFromUI();
+  const unlimited = els.unlimitedSteps.checked;
   const progress = (m) => {
-    const pct = (m.step / m.totalSteps) * 100;
-    els.progressFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
-    els.stepValue.textContent = `${m.step} / ${m.totalSteps}`;
+    if (unlimited) {
+      els.progressFill.style.width = "100%";
+      els.stepValue.textContent = `${m.step} / \u221E`;
+    } else {
+      const pct = (m.step / m.totalSteps) * 100;
+      els.progressFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+      els.stepValue.textContent = `${m.step} / ${m.totalSteps}`;
+    }
     els.lossValue.textContent = Number(m.loss).toFixed(4);
     els.stepTimeValue.textContent = formatMs(Number(m.stepTimeMs || 0));
     els.elapsedValue.textContent = formatMs(Number(m.elapsedMs || 0));
@@ -456,9 +478,11 @@ async function train() {
   try {
     const result = await callWorker("train", { options: opts }, progress);
     if (result.stopped) {
+      state.trained = true;
       setStateText("stopped");
       log(`training stopped at step ${result.stepsDone}`);
     } else {
+      state.trained = true;
       setStateText("trained");
       renderSamples(result.samples || []);
       renderSeriesPath(els.lossChartLine, result.lossSeries || []);
@@ -492,6 +516,12 @@ function stop() {
     log(`stop failed: ${err.message}`);
   });
   log("stop requested");
+}
+
+async function resetTraining() {
+  log("resetting: reinitializing model with fresh weights");
+  await initModel();
+  log("reset complete: model reinitialized, ready to train from scratch");
 }
 
 function wireSliders() {
@@ -537,9 +567,16 @@ function wireUI() {
 
   els.tokenizerPreviewInput.addEventListener("input", renderTokenizerPreview);
 
+  els.unlimitedSteps.addEventListener("change", () => {
+    const unlimited = els.unlimitedSteps.checked;
+    els.steps.disabled = unlimited;
+    document.getElementById("stepsVal").textContent = unlimited ? "\u221E" : els.steps.value;
+  });
+
   els.engineMode.addEventListener("change", () => {
     updateEngineUI();
     state.modelReady = false;
+    state.trained = false;
     setButtons();
     log(`engine switched to ${els.engineMode.value}`);
   });
@@ -561,6 +598,12 @@ function wireUI() {
   });
 
   els.stopBtn.addEventListener("click", stop);
+  els.resetBtn.addEventListener("click", () => {
+    resetTraining().catch((err) => {
+      log(`reset failed: ${err.message}`);
+      setStateText("error");
+    });
+  });
   els.generateBtn.addEventListener("click", () => {
     generate().catch((err) => {
       log(`generate failed: ${err.message}`);
