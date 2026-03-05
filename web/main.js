@@ -307,6 +307,7 @@ async function loadDatasetFromText(text) {
   const suggested = Math.min(3000, Math.max(500, result.numDocs * 3));
   const rounded = Math.round(suggested / 50) * 50;
   els.steps.value = String(rounded);
+  document.getElementById("stepsVal").textContent = String(rounded);
 
   setDatasetStatus(`loaded ${result.numDocs} docs / vocab ${result.vocabSize}`);
   setStateText("dataset ready");
@@ -432,6 +433,25 @@ function stop() {
   log("stop requested");
 }
 
+function wireSliders() {
+  const sliders = [
+    { input: els.nLayer, display: document.getElementById("nLayerVal"), fmt: (v) => v },
+    { input: els.nEmbd, display: document.getElementById("nEmbdVal"), fmt: (v) => v },
+    { input: els.nHead, display: document.getElementById("nHeadVal"), fmt: (v) => v },
+    { input: els.blockSize, display: document.getElementById("blockSizeVal"), fmt: (v) => v },
+    { input: els.steps, display: document.getElementById("stepsVal"), fmt: (v) => v },
+    { input: els.seed, display: document.getElementById("seedVal"), fmt: (v) => v },
+    { input: els.learningRate, display: document.getElementById("learningRateVal"), fmt: (v) => Number.parseFloat(v).toFixed(4) },
+    { input: els.temperature, display: document.getElementById("temperatureVal"), fmt: (v) => Number.parseFloat(v).toFixed(1) },
+  ];
+
+  for (const s of sliders) {
+    s.input.addEventListener("input", () => {
+      s.display.textContent = s.fmt(s.input.value);
+    });
+  }
+}
+
 function wireUI() {
   els.loadPresetBtn.addEventListener("click", () => {
     loadPreset().catch((err) => {
@@ -481,6 +501,7 @@ function wireUI() {
 
 function main() {
   setButtons();
+  wireSliders();
   wireUI();
   initWorker();
   window.addEventListener("resize", layoutPipelineEdges);
