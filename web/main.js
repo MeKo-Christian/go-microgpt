@@ -39,6 +39,8 @@ const els = {
   stepTimeChartLine: document.getElementById("stepTimeChartLine"),
   samplesList: document.getElementById("samplesList"),
   logBox: document.getElementById("logBox"),
+  pipelineStage: document.getElementById("pipelineStage"),
+  pipelineSvg: document.getElementById("pipelineSvg"),
   nodeDataset: document.getElementById("node-dataset"),
   nodeTokenizer: document.getElementById("node-tokenizer"),
   nodeConfig: document.getElementById("node-config"),
@@ -89,6 +91,55 @@ function setActive(el, active) {
   el.classList.toggle("active", !!active);
 }
 
+function anchorPoint(node, side, stageRect) {
+  const r = node.getBoundingClientRect();
+  const centerX = r.left - stageRect.left + r.width / 2;
+  const centerY = r.top - stageRect.top + r.height / 2;
+
+  if (side === "left") return { x: r.left - stageRect.left, y: centerY };
+  if (side === "right") return { x: r.right - stageRect.left, y: centerY };
+  if (side === "top") return { x: centerX, y: r.top - stageRect.top };
+  return { x: centerX, y: r.bottom - stageRect.top };
+}
+
+function horizontalPath(from, to) {
+  const dx = Math.max(28, Math.abs(to.x - from.x) * 0.45);
+  return `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} C ${(from.x + dx).toFixed(1)} ${from.y.toFixed(1)}, ${(to.x - dx).toFixed(1)} ${to.y.toFixed(1)}, ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
+}
+
+function verticalPath(from, to) {
+  const dy = Math.max(20, Math.abs(to.y - from.y) * 0.55);
+  return `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} C ${from.x.toFixed(1)} ${(from.y + dy).toFixed(1)}, ${to.x.toFixed(1)} ${(to.y - dy).toFixed(1)}, ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
+}
+
+function diagonalPath(from, to) {
+  const dy = Math.max(22, Math.abs(to.y - from.y) * 0.4);
+  const mx = (from.x + to.x) / 2;
+  return `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} C ${from.x.toFixed(1)} ${(from.y + dy).toFixed(1)}, ${mx.toFixed(1)} ${(to.y - dy).toFixed(1)}, ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
+}
+
+function layoutPipelineEdges() {
+  if (!els.pipelineStage || !els.pipelineSvg) return;
+  const stageRect = els.pipelineStage.getBoundingClientRect();
+  if (stageRect.width === 0 || stageRect.height === 0) return;
+
+  const datasetOut = anchorPoint(els.nodeDataset, "right", stageRect);
+  const tokenizerIn = anchorPoint(els.nodeTokenizer, "left", stageRect);
+  const tokenizerOut = anchorPoint(els.nodeTokenizer, "right", stageRect);
+  const configIn = anchorPoint(els.nodeConfig, "left", stageRect);
+  const configOut = anchorPoint(els.nodeConfig, "right", stageRect);
+  const trainingIn = anchorPoint(els.nodeTraining, "left", stageRect);
+  const trainingOut = anchorPoint(els.nodeTraining, "bottom", stageRect);
+  const metricsIn = anchorPoint(els.nodeMetrics, "top", stageRect);
+  const generateIn = anchorPoint(els.nodeGenerate, "top", stageRect);
+
+  els.edgeDatasetTokenizer.setAttribute("d", horizontalPath(datasetOut, tokenizerIn));
+  els.edgeTokenizerConfig.setAttribute("d", horizontalPath(tokenizerOut, configIn));
+  els.edgeConfigTraining.setAttribute("d", horizontalPath(configOut, trainingIn));
+  els.edgeTrainingMetrics.setAttribute("d", verticalPath(trainingOut, metricsIn));
+  els.edgeTrainingGenerate.setAttribute("d", diagonalPath(trainingOut, generateIn));
+}
+
 function updatePipelineDiagram() {
   const dataset = state.datasetReady;
   const tokenizer = state.datasetReady;
@@ -109,6 +160,7 @@ function updatePipelineDiagram() {
   setActive(els.edgeConfigTraining, config && training);
   setActive(els.edgeTrainingMetrics, training && metrics);
   setActive(els.edgeTrainingGenerate, training && generate);
+  layoutPipelineEdges();
 }
 
 function formatMs(ms) {
@@ -431,6 +483,8 @@ function main() {
   setButtons();
   wireUI();
   initWorker();
+  window.addEventListener("resize", layoutPipelineEdges);
+  requestAnimationFrame(layoutPipelineEdges);
   setStateText("booting worker");
   setDatasetStatus("starting worker...");
   log("starting wasm worker");
